@@ -1,0 +1,67 @@
+/* guest-view.css - 实时贵宾位(筛选条 / 卡片网格 / 分页) */
+.guest-filter-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.guest-date-sel { width: auto; min-width: 130px; font-size: 12.5px; padding: 7px 30px 7px 12px; }
+.guest-kw { width: 220px; flex-shrink: 0; }
+.portal-live { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--success); }
+.portal-live-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--success);
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+.guest-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+  gap: 13px;
+  margin-bottom: 18px;
+}
+.guest-card {
+  background: var(--surface);
+  border: 1px solid var(--outline-soft);
+  border-radius: var(--radius);
+  padding: 14px;
+  transition: border-color .18s, transform .18s;
+  animation: cardIn .3s ease;
+}
+.guest-card:hover { border-color: var(--outline); transform: translateY(-2px); }
+@keyframes cardIn { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
+
+.guest-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; }
+.guest-avatar {
+  width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 700; color: #fff;
+}
+.guest-avatar.female { background: linear-gradient(135deg, #ff6b9d, #ff8fb3); }
+.guest-avatar.male { background: linear-gradient(135deg, #4ea8ff, #7cc0ff); }
+.guest-card-name { font-size: 13.5px; font-weight: 600; color: var(--on-bg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guest-card-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.guest-card-rows { display: flex; flex-direction: column; gap: 6px; }
+.guest-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
+.guest-row-label { color: var(--tertiary-c); }
+.guest-row-value { color: var(--on-s); font-family: var(--mono); font-size: 11.5px; }
+.guest-tags { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.guest-tag {
+  font-size: 10.5px; padding: 2px 8px; border-radius: 20px;
+  background: var(--surface-2); color: var(--tertiary-c);
+}
+.guest-tag.female { background: rgba(255,107,157,.14); color: var(--color-female); }
+.guest-tag.male { background: rgba(78,168,255,.14); color: var(--color-male); }
+.guest-tag.guild { background: rgba(245,181,68,.14); color: var(--gold); }
+
+/* 分页 */
+.guest-more { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 6px 0 20px; }
+.guest-more-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 8px 16px; border-radius: var(--radius-sm);
+  background: var(--surface); border: 1px solid var(--outline);
+  color: var(--on-s); font-size: 12.5px;
+  transition: background .15s;
+}
+.guest-more-btn:hover:not(:disabled) { background: var(--surface-2); }
+.guest-more-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.guest-page-info { font-size: 12.5px; color: var(--tertiary-c); }

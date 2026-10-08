@@ -1,0 +1,49 @@
+{
+  "name": "shuangyu-assistant",
+  "version": "1.0.0",
+  "description": "双鱼部落语音厅 - 写作业机器人桌面客户端",
+  "author": "shuangyu",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env NODE_ENV=development electron .",
+    "dist": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.shuangyu.assistant",
+    "productName": "双鱼部落写作业机器人",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "design/**/*",
+      "tools/syl-bridge/syl-bridge.apk",
+      "manifest.json",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "electron/logo.png"
+    },
+    "asarUnpack": [
+      "tools/syl-bridge/syl-bridge.apk"
+    ],
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "双鱼部落写作业机器人"
+    }
+  }
+}

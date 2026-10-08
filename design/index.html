@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>双鱼部落写作业机器人</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="titlebar.css">
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/layout.css">
+<link rel="stylesheet" href="css/cards.css">
+<link rel="stylesheet" href="css/guest-view.css">
+<link rel="stylesheet" href="css/rules-view.css">
+<link rel="stylesheet" href="css/task-view.css">
+<link rel="stylesheet" href="css/copywriting-view.css">
+<link rel="stylesheet" href="css/dialog.css">
+</head>
+<body>
+<!-- 自定义暗色标题栏 -->
+<div class="titlebar">
+  <div class="titlebar-title">
+    <div class="titlebar-icon"><span class="material-symbols-outlined">water</span></div>
+    <span class="titlebar-name">双鱼部落写作业机器人</span>
+    <span class="titlebar-badge" id="modeBadge">演示模式</span>
+  </div>
+  <div class="titlebar-controls">
+    <button class="titlebar-btn" id="titlebarMinimize" title="最小化">
+      <svg viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6"/></svg>
+    </button>
+    <button class="titlebar-btn" id="titlebarMaximize" title="最大化/还原">
+      <svg viewBox="0 0 16 16" id="titlebarMaximizeIcon"></svg>
+    </button>
+    <button class="titlebar-btn close" id="titlebarClose" title="关闭">
+      <svg viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
+    </button>
+  </div>
+</div>
+
+<div class="app">
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <nav class="sidebar-nav custom-scroll">
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">数据面板</div>
+        <button class="nav-item active" data-view="ranking">
+          <span class="material-symbols-outlined">sensors</span>
+          <span>实时贵宾位</span>
+          <span class="nav-count" id="guestNavCount">--</span>
+        </button>
+        <button class="nav-item" data-view="rules">
+          <span class="material-symbols-outlined">tune</span>
+          <span>规则设定</span>
+        </button>
+        <button class="nav-item" data-view="task">
+          <span class="material-symbols-outlined">workspaces</span>
+          <span>控制台</span>
+        </button>
+        <button class="nav-item" data-view="copywriting">
+          <span class="material-symbols-outlined">edit_note</span>
+          <span>文案编辑</span>
+        </button>
+        <button class="nav-item" data-view="blacklist">
+          <span class="material-symbols-outlined">block</span>
+          <span>黑名单设置</span>
+        </button>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">系统</div>
+        <button class="nav-item" data-view="settings">
+          <span class="material-symbols-outlined">settings</span>
+          <span>设置</span>
+        </button>
+      </div>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="client-status" id="clientStatus">
+        <span class="status-dot stopped" id="clientDot"></span>
+        <span id="clientText">检测客户端...</span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <!-- 顶部栏 -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="snapshot-time">
+          <span class="status-dot" id="topSyncDot"></span>
+          实时同步 · 上次更新 <span id="lastSyncTime">--:--</span>
+        </span>
+      </div>
+      <div class="topbar-right">
+        <button class="topbar-btn" id="refreshBtn" title="刷新界面">
+          <span class="material-symbols-outlined">refresh</span>
+        </button>
+        <button class="topbar-btn" id="aboutBtn" title="关于">
+          <span class="material-symbols-outlined">info</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="content custom-scroll">
+      <!-- ===== 视图:实时贵宾位 ===== -->
+      <section class="view ranking-view active">
+        <section class="stats-row">
+          <div class="stat-card">
+            <div class="stat-label"><span class="dot" style="background:var(--color-female)"></span>女神池(ID数)</div>
+            <div class="stat-value" id="statFemalePool">-</div>
+            <div class="stat-delta">今日采集女神</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label"><span class="dot" style="background:var(--color-male)"></span>男神池(ID数)</div>
+            <div class="stat-value" id="statMalePool">-</div>
+            <div class="stat-delta">今日采集男神</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label"><span class="dot" style="background:var(--gold)"></span>今日记录</div>
+            <div class="stat-value" id="statTodayTotal">-</div>
+            <div class="stat-delta">当日采集条数</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label"><span class="dot" style="background:var(--secondary)"></span>数据更新</div>
+            <div class="stat-value" id="statUpdatedAt" style="font-size:20px">-</div>
+            <div class="stat-delta" id="portalLiveState">连接中...</div>
+          </div>
+        </section>
+
+        <section class="card guest-filter-bar">
+          <div class="guest-seg" id="guestSeg">
+            <button class="guest-seg-btn active" data-seg="all">全部</button>
+            <button class="guest-seg-btn seg-female" data-seg="female">女神</button>
+            <button class="guest-seg-btn seg-male" data-seg="male">男神</button>
+          </div>
+          <select id="guestDateSel" class="guest-date-sel" title="切换数据日期"></select>
+          <input type="text" id="guestKw" class="guest-kw" placeholder="搜索 昵称 / ID / 房间" />
+          <span class="grow" style="flex:1"></span>
+          <span class="portal-live">
+            <span class="portal-live-dot"></span>
+            <span id="portalLiveText">实时流</span>
+          </span>
+        </section>
+
+        <div class="guest-grid" id="guestGrid"></div>
+
+        <div class="card" id="guestEmpty" hidden style="padding:48px;text-align:center;">
+          <span class="material-symbols-outlined" style="font-size:48px;color:var(--tertiary-c);opacity:0.6;margin-bottom:16px;">search_off</span>
+          <div style="font-size:16px;font-weight:600;color:var(--on-s);margin-bottom:8px;">暂无数据</div>
+          <div style="font-size:13px;color:var(--tertiary-c);">采集数据将实时显示在这里</div>
+        </div>
+
+        <div class="guest-more">
+          <button class="guest-more-btn" id="guestPrevBtn" disabled>
+            <span class="material-symbols-outlined" style="font-size:16px">chevron_left</span>前一页
+          </button>
+          <span class="guest-page-info" id="guestPageInfo"></span>
+          <button class="guest-more-btn" id="guestNextBtn" disabled>
+            下一页<span class="material-symbols-outlined" style="font-size:16px">chevron_right</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- ===== 视图:规则设定 ===== -->
+      <section class="view rules-view" hidden>
+        <div class="rules-header">
+          <div class="rules-title">
+            <span class="material-symbols-outlined">tune</span>
+            <h2>规则设定</h2>
+            <span class="rules-subtitle">配置自动私聊的执行规则</span>
+          </div>
+          <button class="save-btn" id="saveRulesBtn">
+            <span class="material-symbols-outlined">save</span>保存配置
+          </button>
+        </div>
+
+        <div class="rules-grid">
+          <div class="rules-card span-2">
+            <div class="rules-card-header">
+              <span class="accent"></span>
+              <h3>目标来源</h3>
+              <span class="rules-card-desc">选择私聊用户的来源</span>
+            </div>
+            <div class="radio-card-group" data-group="source">
+              <label class="radio-card">
+                <input type="radio" name="source" value="cloud" checked>
+                <span class="radio-label"><span class="material-symbols-outlined">cloud</span>云端 ID</span>
+                <span class="radio-desc">使用汇总的 ID 列表(按小时选择)</span>
+              </label>
+              <label class="radio-card">
+                <input type="radio" name="source" value="local">
+                <span class="radio-label"><span class="material-symbols-outlined">list_alt</span>本地 ID</span>
+                <span class="radio-desc">手动输入用户 ID 列表</span>
+              </label>
+            </div>
+
+            <div class="cloud-id-input" id="cloudIdInput">
+              <div class="cloud-id-row">
+                <div class="cloud-id-field">
+                  <label class="field-label">数据日期</label>
+                  <select id="cloudDateSel" class="cloud-sel"></select>
+                </div>
+                <div class="cloud-id-field">
+                  <label class="field-label">小时汇总时段</label>
+                  <select id="cloudHourSel" class="cloud-sel"></select>
+                </div>
+                <div class="cloud-id-count" id="cloudIdCount">-- 个 ID</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <label class="field-label" style="margin:0;">ID 列表预览</label>
+                <span style="flex:1"></span>
+                <div class="guest-seg" id="cloudGenderSeg" style="padding:2px;">
+                  <button class="guest-seg-btn active" data-g="all">全部</button>
+                  <button class="guest-seg-btn seg-female" data-g="f">女</button>
+                  <button class="guest-seg-btn seg-male" data-g="m">男</button>
+                </div>
+                <div class="guest-seg" id="cloudGuildSeg" style="padding:2px;">
+                  <button class="guest-seg-btn active" data-gu="all">不限工会</button>
+                  <button class="guest-seg-btn" data-gu="has">有工会</button>
+                  <button class="guest-seg-btn" data-gu="none">无工会</button>
+                </div>
+                <button class="guest-more-btn" id="cloudCopyBtn" style="padding:6px 14px;">
+                  <span class="material-symbols-outlined" style="font-size:15px">content_copy</span>一键复制
+                </button>
+              </div>
+              <div class="cloud-id-preview custom-scroll" id="cloudIdPreview">加载中...</div>
+              <div class="field-hint">
+                <span class="material-symbols-outlined">info</span>
+                男女与工会筛选同时决定预览、复制与私聊发送目标(全部=女在前/男在后)
+              </div>
+            </div>
+
+            <div class="local-id-input" id="localIdInput" hidden>
+              <label class="field-label">本地 ID 列表</label>
+              <textarea id="localIdList" rows="6" placeholder="一行一个 ID,按顺序从上到下依次发送私聊&#10;例如:&#10;12345678&#10;87654321"></textarea>
+              <div class="field-hint"><span class="material-symbols-outlined">info</span>一行一个 ID,按顺序从上到下依次发送私聊</div>
+              <div class="resolve-nick-row">
+                <button type="button" class="save-btn ghost" id="resolveNickBtn">
+                  <span class="material-symbols-outlined">person_search</span>自动解析昵称
+                </button>
+                <span class="resolve-nick-hint" id="resolveNickHint">真实模式必须带昵称才能发送,点此自动补全(需模拟器已登录)</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="rules-card span-2">
+            <div class="rules-card-header">
+              <span class="accent" style="background:var(--primary-c)"></span>
+              <h3>发送延迟</h3>
+              <span class="rules-card-desc">每条私聊之间的随机间隔</span>
+            </div>
+            <div class="delay-row">
+              <div class="delay-field">
+                <label class="field-label">最小延迟(秒)</label>
+                <input type="number" id="delayMin" value="15" min="1" max="60">
+              </div>
+              <div class="delay-slider-wrap">
+                <input type="range" id="delaySlider" min="1" max="60" value="15">
+                <div class="delay-slider-track"><span class="delay-min">1s</span><span class="delay-max">60s</span></div>
+              </div>
+              <div class="delay-field">
+                <label class="field-label">最大延迟(秒)</label>
+                <input type="number" id="delayMax" value="40" min="1" max="60">
+              </div>
+            </div>
+            <div class="field-hint">
+              <span class="material-symbols-outlined">info</span>
+              发送一条私聊后,在 <b id="delayPreview">15 ~ 40</b> 秒之间随机等待,再发送下一条
+            </div>
+          </div>
+
+          <div class="rules-card span-2">
+            <div class="rules-card-header">
+              <span class="accent" style="background:var(--tertiary)"></span>
+              <h3>高级选项</h3>
+            </div>
+            <div class="switch-list">
+              <label class="switch-row">
+                <div class="switch-info">
+                  <span class="switch-title">今日写过不再写</span>
+                  <span class="switch-desc">今日已发送过私聊的 ID,后续即使再次出现也不重复发送</span>
+                </div>
+                <span class="switch"><input type="checkbox" id="optNoDuplicate" checked><span class="switch-slider"></span></span>
+              </label>
+              <div class="delay-field" style="margin-top:12px;width:100%;">
+                <label class="field-label">发送上限(条)</label>
+                <input type="number" id="sendLimit" value="0" min="0" placeholder="0=不限" style="width:100%;">
+                <div class="field-hint" style="margin-top:4px;">
+                  <span class="material-symbols-outlined">info</span>
+                  发送完指定条数后自动停止,填 0 或留空表示不限制
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 视图:控制台 ===== -->
+      <section class="view task-view" hidden>
+        <div class="task-control-bar">
+          <div class="task-control-info">
+            <div class="task-card-title"><span class="material-symbols-outlined">chat</span><h3>自动私聊</h3></div>
+            <div class="task-card-desc">读取规则设定保存的配置,按筛选的 ID 列表逐个发送私聊</div>
+          </div>
+          <div class="task-control-side">
+            <div class="task-global-status">
+              <span class="status-dot stopped" id="taskPrivateDot"></span>
+              <span id="taskPrivateText">已停止</span>
+            </div>
+            <div class="task-control-actions">
+              <button class="task-btn task-btn-start" id="taskPrivateStart">
+                <span class="material-symbols-outlined">play_arrow</span>启动私聊
+              </button>
+              <button class="task-btn task-btn-stop" id="taskPrivateStop" disabled>
+                <span class="material-symbols-outlined">stop</span>停止私聊
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="task-stats-row">
+          <div class="task-stat-card"><span class="task-stat-label">已发送</span><span class="task-stat-value" id="taskPrivateSent">0</span></div>
+          <div class="task-stat-card"><span class="task-stat-label">成功</span><span class="task-stat-value" id="taskPrivateOk">0</span></div>
+          <div class="task-stat-card"><span class="task-stat-label">失败</span><span class="task-stat-value" id="taskPrivateFail">0</span></div>
+          <div class="task-stat-card"><span class="task-stat-label">今日已写</span><span class="task-stat-value" id="taskPrivateToday">0</span></div>
+          <div class="task-stat-card"><span class="task-stat-label">本周已写</span><span class="task-stat-value" id="taskPrivateWeek">0</span></div>
+          <div class="task-stat-card"><span class="task-stat-label">本月已写</span><span class="task-stat-value" id="taskPrivateMonth">0</span></div>
+        </div>
+
+        <div class="task-grid">
+          <div class="task-card" data-task="welcome">
+            <div class="task-card-header">
+              <div class="task-card-title"><span class="material-symbols-outlined">waving_hand</span><h3>自动欢迎</h3></div>
+              <span class="status-dot stopped" id="taskWelcomeDot"></span>
+            </div>
+            <div class="task-card-desc">监听房间新用户进入,自动点击欢迎图标</div>
+            <div class="task-card-stats">
+              <div class="task-stat"><span class="task-stat-label">已点击</span><span class="task-stat-value" id="taskWelcomeClicked">0</span></div>
+              <div class="task-stat"><span class="task-stat-label">跳过</span><span class="task-stat-value" id="taskWelcomeSkipped">0</span></div>
+            </div>
+            <div class="task-card-actions">
+              <button class="task-btn task-btn-start" id="taskWelcomeStart"><span class="material-symbols-outlined">play_arrow</span>启动</button>
+              <button class="task-btn task-btn-stop" id="taskWelcomeStop" disabled><span class="material-symbols-outlined">pause</span>暂停</button>
+            </div>
+          </div>
+
+          <div class="task-card" data-task="call">
+            <div class="task-card-header">
+              <div class="task-card-title"><span class="material-symbols-outlined">bolt</span><h3>自动打call</h3></div>
+              <span class="status-dot stopped" id="taskCallDot"></span>
+            </div>
+            <div class="task-card-desc">房间内自动发送表情(打call/666 等)</div>
+            <div class="task-card-stats">
+              <div class="task-stat"><span class="task-stat-label">已发送</span><span class="task-stat-value" id="taskCallSent">0</span></div>
+              <div class="task-stat"><span class="task-stat-label">表情</span><span class="task-stat-value" id="taskCallEmoji">打call</span></div>
+            </div>
+            <div class="task-card-actions">
+              <button class="task-btn task-btn-start" id="taskCallStart"><span class="material-symbols-outlined">play_arrow</span>启动</button>
+              <button class="task-btn task-btn-stop" id="taskCallStop" disabled><span class="material-symbols-outlined">pause</span>暂停</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="task-log-section">
+          <div class="task-log-header">
+            <h3>实时日志</h3>
+            <button class="task-log-clear" id="taskLogClear">清空</button>
+          </div>
+          <div class="task-log-list" id="taskLogList">
+            <div class="task-log-empty">暂无日志,启动任务后将显示运行记录</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 视图:文案编辑 ===== -->
+      <section class="view copywriting-view" hidden>
+        <div class="copywriting-toolbar">
+          <div class="task-card-title"><span class="material-symbols-outlined">edit_note</span><h3>文案编辑</h3></div>
+          <div class="copywriting-actions">
+            <span class="copywriting-count">共 <b id="copyTotalCount">0</b> 条文案</span>
+            <button class="task-btn task-btn-start" id="copySaveBtn"><span class="material-symbols-outlined">save</span>保存配置</button>
+          </div>
+        </div>
+
+        <div class="copywriting-content">
+          <div class="copywriting-group">
+            <div class="copywriting-group-title"><span class="material-symbols-outlined">subject</span>文案配置</div>
+            <div class="copywriting-mode">
+              <div class="rules-card-header"><span class="accent" style="background:var(--gold)"></span><h3>发送模式</h3></div>
+              <div class="radio-card-group">
+                <label class="radio-card">
+                  <input type="radio" name="copyMode" value="random" checked>
+                  <span class="radio-card-content"><span class="radio-card-title">随机发送文案</span><span class="radio-card-desc">每次从所有文案中随机选一条</span></span>
+                </label>
+                <label class="radio-card">
+                  <input type="radio" name="copyMode" value="select">
+                  <span class="radio-card-content"><span class="radio-card-title">指定文案</span><span class="radio-card-desc">点击下方某条文案选中,固定发送该条</span></span>
+                </label>
+                <label class="radio-card">
+                  <input type="radio" name="copyMode" value="mediaonly">
+                  <span class="radio-card-content"><span class="radio-card-title">仅发送多媒体消息</span><span class="radio-card-desc">不发送文案,只发图片/语音</span></span>
+                </label>
+              </div>
+            </div>
+            <div class="copywriting-list" id="copywritingList"></div>
+            <div class="copywriting-add">
+              <input type="text" id="copywritingNewInput" placeholder="输入新文案,回车或点添加">
+              <button class="task-btn task-btn-start" id="copywritingAddBtn"><span class="material-symbols-outlined">add</span>添加</button>
+            </div>
+          </div>
+
+          <div class="copywriting-group">
+            <div class="copywriting-group-title"><span class="material-symbols-outlined">attachment</span>多媒体附件</div>
+            <div class="copywriting-media">
+              <div class="copywriting-media-header">
+                <span class="material-symbols-outlined">image</span><h4>图片发送</h4>
+                <span class="switch"><input type="checkbox" id="copyImageEnable"><span class="switch-slider"></span></span>
+              </div>
+              <div class="copywriting-media-body">
+                <button class="copywriting-media-upload" id="copyImagePickBtn" type="button">
+                  <span class="material-symbols-outlined">upload_file</span>选择本地图片
+                </button>
+                <div class="copywriting-media-file" id="copyImageFileInfo" hidden>
+                  <span class="material-symbols-outlined file-icon">image</span>
+                  <span class="copywriting-media-filename" id="copyImageFileName">未选择文件</span>
+                  <button class="copywriting-media-remove" id="copyImageRemoveBtn" type="button"><span class="material-symbols-outlined">close</span></button>
+                </div>
+                <div class="copywriting-media-preview" id="copyImagePreview"><span class="copywriting-media-empty">选择文件后显示预览</span></div>
+              </div>
+            </div>
+
+            <div class="copywriting-media">
+              <div class="copywriting-media-header">
+                <span class="material-symbols-outlined">graphic_eq</span><h4>语音发送</h4>
+                <span class="switch"><input type="checkbox" id="copyVoiceEnable"><span class="switch-slider"></span></span>
+              </div>
+              <div class="copywriting-media-body">
+                <button class="copywriting-media-upload" id="copyVoicePickBtn" type="button">
+                  <span class="material-symbols-outlined">upload_file</span>选择本地音频
+                </button>
+                <div class="copywriting-media-file" id="copyVoiceFileInfo" hidden>
+                  <span class="material-symbols-outlined file-icon">graphic_eq</span>
+                  <span class="copywriting-media-filename" id="copyVoiceFileName">未选择文件</span>
+                  <button class="copywriting-media-remove" id="copyVoiceRemoveBtn" type="button"><span class="material-symbols-outlined">close</span></button>
+                </div>
+                <div class="copywriting-media-info">
+                  <span class="material-symbols-outlined">info</span>
+                  <span>支持 MP3/WAV/AMR/AAC(时长 1-60 秒)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 视图:黑名单 ===== -->
+      <section class="view blacklist-view" hidden>
+        <div class="copywriting-toolbar">
+          <div class="task-card-title"><span class="material-symbols-outlined">block</span><h3>黑名单设置</h3></div>
+          <div class="copywriting-actions">
+            <span class="copywriting-count">共 <b id="blacklistCount">0</b> 个 ID</span>
+            <button class="task-btn task-btn-start" id="blacklistSaveBtn"><span class="material-symbols-outlined">save</span>保存生效</button>
+          </div>
+        </div>
+        <div class="blacklist-content">
+          <div class="copywriting-group">
+            <div class="copywriting-group-title"><span class="material-symbols-outlined">list_alt</span>黑名单 ID 列表</div>
+            <textarea id="blacklistInput" class="blacklist-textarea" rows="14" placeholder="每一行一个 ID&#10;例如:&#10;12345678&#10;87654321"></textarea>
+            <div class="field-hint"><span class="material-symbols-outlined">info</span>出现在黑名单的 ID,发送私聊时会自动过滤。保存后立即生效。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 视图:设置 ===== -->
+      <section class="view settings-view" hidden>
+        <div class="rules-header">
+          <div class="rules-title"><span class="material-symbols-outlined">settings</span><h2>设置</h2><span class="rules-subtitle">客户端连接与运行环境</span></div>
+        </div>
+        <div class="rules-grid">
+          <div class="rules-card span-2">
+            <div class="rules-card-header"><span class="accent"></span><h3>模拟器连接(真实模式)</h3></div>
+            <div class="settings-row"><span class="settings-label">连接状态</span><span class="settings-value" id="setEmuStatus">检测中...</span></div>
+            <div class="settings-row"><span class="settings-label">设备</span><span class="settings-value mono" id="setEmuSerial">--</span></div>
+            <div class="settings-row"><span class="settings-label">ADB 路径</span><span class="settings-value mono" id="setEmuAdb">--</span></div>
+            <div class="settings-row"><span class="settings-label">无障碍桥接</span><span class="settings-value" id="setEmuBridge">--</span></div>
+            <div class="settings-row"><span class="settings-label">运行模式</span><span class="settings-value" id="setRunMode">--</span></div>
+            <div class="field-hint" style="margin-top:12px;">
+              <span class="material-symbols-outlined">info</span>
+              真实模式通过<b>雷电模拟器 + ADB</b> 驱动安卓版「双鱼部落」。请先启动雷电模拟器并登录双鱼部落。
+              房间页有持续动效,系统无法读取控件树,因此使用内置的<b>无障碍桥接</b>服务读取。
+              未检测到模拟器时自动进入演示模式(全流程模拟,不真实发送)。
+            </div>
+            <div class="client-actions">
+              <button class="save-btn" id="setEmuConnectBtn">
+                <span class="material-symbols-outlined">cable</span>检测并连接模拟器
+              </button>
+              <button class="save-btn ghost" id="setEmuInstallBridgeBtn">
+                <span class="material-symbols-outlined">extension</span>安装/启用无障碍桥接
+              </button>
+              <button class="save-btn ghost" id="setPickAdbBtn">
+                <span class="material-symbols-outlined">folder_open</span>手动指定 adb 路径
+              </button>
+              <button class="save-btn ghost" id="setRedetectBtn">
+                <span class="material-symbols-outlined">refresh</span>重新检测
+              </button>
+            </div>
+            <div class="field-hint" id="setRealHint" style="margin-top:12px;display:none;"></div>
+          </div>
+          <div class="rules-card span-2">
+            <div class="rules-card-header"><span class="accent" style="background:var(--primary-c)"></span><h3>关于</h3></div>
+            <div class="settings-row"><span class="settings-label">软件名称</span><span class="settings-value">双鱼部落写作业机器人</span></div>
+            <div class="settings-row"><span class="settings-label">版本</span><span class="settings-value" id="setVersion">--</span></div>
+            <div class="settings-row"><span class="settings-label">技术架构</span><span class="settings-value">Electron + ADB 模拟器自动化</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- 自定义弹窗 -->
+<div class="confirm-overlay" id="confirmOverlay">
+  <div class="confirm-dialog">
+    <div class="confirm-title" id="confirmTitle">确认</div>
+    <div class="confirm-msg" id="confirmMsg"></div>
+    <div class="confirm-actions" id="confirmActions">
+      <button class="confirm-btn cancel" id="confirmCancel">取消</button>
+      <button class="confirm-btn ok" id="confirmOk">确认</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script src="js/utils.js"></script>
+<script src="js/dialog.js"></script>
+<script src="js/guest-view.js"></script>
+<script src="js/rules-view.js"></script>
+<script src="js/task-console.js"></script>
+<script src="js/copywriting.js"></script>
+<script src="js/blacklist.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/app.js"></script>
+<script src="titlebar.js"></script>
+</body>
+</html>

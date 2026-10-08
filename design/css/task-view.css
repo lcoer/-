@@ -1,0 +1,89 @@
+/* task-view.css - 控制台(任务卡片 / 统计 / 实时日志) */
+.task-control-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  background: var(--surface); border: 1px solid var(--outline-soft);
+  border-radius: var(--radius); padding: 18px 22px;
+  margin-bottom: 16px;
+}
+.task-control-info { flex: 1; }
+.task-card-title { display: flex; align-items: center; gap: 10px; }
+.task-card-title .material-symbols-outlined { font-size: 21px; color: var(--primary-c); }
+.task-card-title h3 { font-size: 15.5px; font-weight: 600; color: var(--on-bg); }
+.task-card-desc { font-size: 12.5px; color: var(--tertiary-c); margin-top: 6px; }
+.task-control-side { display: flex; align-items: center; gap: 20px; }
+.task-global-status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--on-s); }
+.task-control-actions { display: flex; gap: 10px; }
+
+.task-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 18px; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 600;
+  transition: filter .15s, transform .1s, background .15s;
+}
+.task-btn .material-symbols-outlined { font-size: 18px; }
+.task-btn:active:not(:disabled) { transform: scale(0.98); }
+.task-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.task-btn-start { background: var(--primary); color: #fff; }
+.task-btn-start:hover:not(:disabled) { filter: brightness(1.1); }
+.task-btn-stop { background: var(--surface-3); color: var(--on-s); }
+.task-btn-stop:hover:not(:disabled) { background: #333a52; }
+
+/* 私聊统计行 */
+.task-stats-row {
+  display: grid; grid-template-columns: repeat(6, 1fr);
+  gap: 12px; margin-bottom: 16px;
+}
+.task-stat-card {
+  background: var(--surface); border: 1px solid var(--outline-soft);
+  border-radius: var(--radius-sm); padding: 13px 15px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.task-stat-label { font-size: 12px; color: var(--tertiary-c); }
+.task-stat-value { font-size: 21px; font-weight: 600; color: var(--on-bg); font-variant-numeric: tabular-nums; }
+
+/* 任务卡片网格 */
+.task-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.task-card {
+  background: var(--surface); border: 1px solid var(--outline-soft);
+  border-radius: var(--radius); padding: 18px 20px;
+}
+.task-card-header { display: flex; align-items: center; justify-content: space-between; }
+.task-card-stats { display: flex; gap: 26px; margin: 16px 0; }
+.task-stat { display: flex; flex-direction: column; gap: 5px; }
+.task-stat .task-stat-label { font-size: 11.5px; }
+.task-stat .task-stat-value { font-size: 17px; }
+.task-card-actions { display: flex; gap: 10px; }
+
+/* 实时日志 */
+.task-log-section {
+  background: var(--surface); border: 1px solid var(--outline-soft);
+  border-radius: var(--radius); overflow: hidden;
+}
+.task-log-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 20px; border-bottom: 1px solid var(--outline-soft);
+}
+.task-log-header h3 { font-size: 14px; font-weight: 600; color: var(--on-bg); }
+.task-log-clear {
+  font-size: 12px; color: var(--tertiary-c); padding: 5px 12px;
+  border-radius: 7px; transition: background .15s, color .15s;
+}
+.task-log-clear:hover { background: var(--surface-2); color: var(--on-s); }
+.task-log-list {
+  height: 280px; overflow-y: auto; padding: 12px 18px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.85;
+  background: #0b0d13;
+}
+.task-log-empty { color: var(--muted); font-family: 'Inter', sans-serif; font-size: 13px; text-align: center; padding: 60px 0; }
+.log-line { display: flex; gap: 10px; padding: 1px 0; }
+.log-time { color: var(--muted); flex-shrink: 0; }
+.log-task { flex-shrink: 0; font-weight: 500; }
+.log-task.system { color: var(--primary-c); }
+.log-task.private { color: var(--secondary); }
+.log-task.welcome { color: var(--gold); }
+.log-task.call { color: #b18cff; }
+.log-msg { color: var(--on-s); word-break: break-all; }
+.log-line.ok .log-msg { color: var(--success); }
+.log-line.fail .log-msg { color: var(--error); }
+.log-line.skip .log-msg { color: var(--warn); }
+.log-line.ended .log-msg { color: var(--tertiary-c); font-style: italic; }

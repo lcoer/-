@@ -1,0 +1,35 @@
+{
+  "manifestVersion": "1.0",
+  "generatedAt": "2026-10-07",
+  "project": "双鱼部落写作业机器人",
+  "description": "双鱼部落语音厅自动化助手 - 自动私聊/自动欢迎/自动打call/采集",
+  "architecture": {
+    "type": "Electron + Chrome DevTools Protocol",
+    "principle": "以 --remote-debugging-port 拉起官方『双鱼部落』客户端,通过 CDP 向其渲染进程注入 JS,调用其内部接口与融云 SDK 完成自动化。消息由官方客户端真实发出,设备指纹与登录态真实。",
+    "layers": {
+      "ui": "design/ - 无边框暗色窗口,侧边导航(实时贵宾位/规则设定/控制台/文案编辑/黑名单/设置)",
+      "main": "electron/ - 主进程:窗口、内置静态服务、IPC、服务层聚合",
+      "engine": "src/ - CDP 自动化引擎(ESM):cdp-client / message-sender / user-resolver / auto-welcome / auto-call / room-collector / voice-adapter"
+    }
+  },
+  "features": [
+    "自动私聊:文字→图片→语音链,随机延迟、黑名单过滤、今日去重、发送上限",
+    "自动欢迎:MutationObserver 监听房间新用户,队列化点击",
+    "自动打call:房间内循环发送表情",
+    "实时贵宾位:采集记录卡片流 + 实时统计",
+    "规则设定:云端ID/本地ID 来源、延迟范围、高级选项",
+    "文案编辑:多文案随机/指定/仅多媒体、图片与语音附件",
+    "黑名单:发送目标过滤"
+  ],
+  "client": {
+    "productName": "双鱼部落",
+    "executable": "sybl-electron.exe",
+    "detection": "环境变量 SYBL_EXE_PATH > 打包内嵌 resources/pisces-client > 系统常规安装位置",
+    "launchArgs": ["--force-renderer-accessibility", "--remote-debugging-port=<随机>", "--remote-debugging-address=127.0.0.1"],
+    "criticalNote": "必须以客户端安装目录为工作目录启动,否则 liteav.dll/live_kit_engine.dll 等原生模块加载失败"
+  },
+  "demoMode": {
+    "trigger": "未检测到官方客户端时自动进入",
+    "behavior": "全流程模拟(同样的任务框架/统计/日志),不真实发送"
+  }
+}

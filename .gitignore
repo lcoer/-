@@ -1,0 +1,37 @@
+# ===== 依赖 =====
+node_modules/
+package-lock.json
+
+# ===== 构建产物 / 临时文件 =====
+dist/
+build/
+out/
+tmp/
+*.log
+*.tmp
+
+# ===== 截图/调试产物 =====
+_screenshot*.png
+_shot.mjs
+*.idsig
+
+# ===== APK 编译中间产物(保留 syl-bridge 源码工程 app/ 与 build.sh) =====
+tools/syl-bridge/build/
+tools/syl-bridge/*.idsig
+
+# ===== 参考文件夹(第三方项目,禁止提交) =====
+_ref_extract/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ===== 本地数据 / 密钥(运行时生成,勿提交) =====
+*.keystore
+local-data/
+user-data/
+
+# ===== WorkBuddy 本地工作记录(不随代码发布) =====
+.workbuddy/

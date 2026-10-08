@@ -1,0 +1,78 @@
+/* cards.css - 卡片、统计、表单通用组件 */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--outline-soft);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+
+/* 统计卡片行 */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--outline-soft);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  transition: border-color .18s, transform .18s;
+}
+.stat-card:hover { border-color: var(--outline); transform: translateY(-2px); }
+.stat-label { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--tertiary-c); margin-bottom: 10px; }
+.stat-value { font-size: 27px; font-weight: 600; color: var(--on-bg); font-variant-numeric: tabular-nums; }
+.stat-delta { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); margin-top: 7px; }
+
+/* 单选卡片 */
+.radio-card-group { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.radio-card-group[data-group="source"] { grid-template-columns: 1fr 1fr; }
+.radio-card {
+  position: relative;
+  display: flex; flex-direction: column; gap: 6px;
+  border: 1.5px solid var(--outline);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color .18s, background .18s;
+}
+.radio-card:hover { border-color: var(--outline); background: var(--surface-2); }
+.radio-card input { position: absolute; opacity: 0; }
+.radio-card:has(input:checked) { border-color: var(--primary); background: var(--primary-dim); }
+.radio-label { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--on-bg); }
+.radio-label .material-symbols-outlined { font-size: 18px; color: var(--primary-c); }
+.radio-desc { font-size: 11.5px; color: var(--tertiary-c); line-height: 1.5; }
+.radio-card-content { display: flex; flex-direction: column; gap: 5px; }
+.radio-card-title { font-size: 13.5px; font-weight: 600; color: var(--on-bg); }
+.radio-card-desc { font-size: 11.5px; color: var(--tertiary-c); line-height: 1.5; }
+
+/* 表单输入 */
+input[type="text"], input[type="number"], textarea, select {
+  background: var(--surface-2);
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-sm);
+  color: var(--on-bg);
+  padding: 9px 12px;
+  font-size: 13px;
+  width: 100%;
+  transition: border-color .15s;
+}
+input[type="text"]:focus, input[type="number"]:focus, textarea:focus, select:focus { border-color: var(--primary); }
+input::placeholder, textarea::placeholder { color: var(--muted); }
+textarea { resize: vertical; line-height: 1.6; }
+select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%238b93a8' stroke-width='1.3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; background-size: 12px; padding-right: 30px; }
+
+/* 范围滑块 */
+input[type="range"] {
+  -webkit-appearance: none; width: 100%; height: 4px;
+  background: var(--surface-3); border-radius: 4px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px;
+  background: var(--primary); border-radius: 50%; cursor: pointer;
+  box-shadow: 0 0 0 3px rgba(107,115,255,.2);
+}
+
+/* 空状态 */
+.card[hidden] { display: none; }
