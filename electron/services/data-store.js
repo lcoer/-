@@ -24,14 +24,21 @@ const STATE = {
   configFile: null,
   statsFile: null,
   sentFile: null,
+  sourceFile: null,
+  sourcePref: { source: 'demo' },  // 持久化的数据源偏好
   config: {},
   stats: {},
   sentToday: {},          // { 'YYYY-MM-DD': { machineCode: [uid...] } }
-  records: [],            // 演示模式下的采集记录
+  records: [],            // 采集记录(demo 生成的 + 真实房间采集的)
   streamCallback: null,
   connected: true,
   lastEventAt: null,
   timer: null,
+  // 数据源:demonstration 生成器 or 真实房间采集
+  source: 'demo',         // 'demo' | 'room'
+  lastCollectAt: null,    // 最近一次真实采集时间
+  lastCollectRoom: null,  // 最近一次真实采集所在房间
+  collectError: null,     // 最近一次真实采集错误
 };
 
 const NICKNAMES_F = ['软糖', '小鹿', '柚子', '琉璃', '安安', '绵绵', '晚风', '桃夭', '阿狸', '清欢'];
@@ -51,11 +58,20 @@ function init() {
   STATE.configFile = path.join(userDataDir(), 'config.json');
   STATE.statsFile = path.join(userDataDir(), 'stats.json');
   STATE.sentFile = path.join(userDataDir(), 'sent.json');
+  STATE.sourceFile = path.join(userDataDir(), 'source.json');
   loadJson(STATE.configFile, STATE.config, defaultConfig());
   loadJson(STATE.statsFile, STATE.stats, {});
   loadJson(STATE.sentFile, STATE.sentToday, {});
-  buildDemoRecords();
-  startDemoStream();
+  loadJson(STATE.sourceFile, STATE.sourcePref, { source: 'demo' });
+
+  // 真实采集模式下:不生成任何演示数据,保持面板干净(只等真实采集写入)
+  if (STATE.sourcePref.source === 'room') {
+    STATE.source = 'room';
+    STATE.records = [];
+  } else {
+    buildDemoRecords();
+    startDemoStream();
+  }
 }
 
 function loadJson(file, target, fallback) {
@@ -127,6 +143,7 @@ function makeRecord(sex, ts) {
     room: pick(ROOMS),
     guild: pick(GUILDS),
     online: true,
+    source: 'demo',
     ts: t,
     time: new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
   };
@@ -162,6 +179,142 @@ function startDemoStream() {
 
 function setStreamCallback(fn) { STATE.streamCallback = fn; }
 
+// ===== 真实数据注入(房间采集器调用) =====
+// 把采集到的真实用户写入面板。去重规则:同一天同一 uid 只保留最新一条。
+// @param {Array} list  形如 [{ uid, nickname, sex, room, guild, rongCloudId, ts }]
+// @param {object} meta { room, source }
+// 返回 { added, updated, total }
+function ingestRealRecords(list = [], meta = {}) {
+  if (!Array.isArray(list) || !list.length) return { added: 0, updated: 0, total: STATE.records.length };
+  const now = Date.now();
+  const t = meta && meta.ts ? meta.ts : now;
+  let added = 0, updated = 0;
+
+  for (const raw of list) {
+    if (!raw) continue;
+    const isReal = raw.uidReal !== false;
+    // 真实 uid 只保留数字;占位 uid(n+哈希)保留原样,否则字母会被过滤掉变成乱码数字
+    let uid = raw.uid ? String(raw.uid).trim() : '';
+    if (isReal) uid = uid.replace(/\D/g, '');
+    if (!uid) continue;
+    const rec = {
+      uid,
+      rongCloudId: raw.rongCloudId ? String(raw.rongCloudId) : null,
+      nickname: raw.nickname || `用户${uid.slice(-4)}`,
+      avatar: raw.avatar || null,
+      sex: raw.sex === 'female' ? 'female' : (raw.sex === 'male' ? 'male' : 'unknown'),
+      room: raw.room || meta.room || '',
+      guild: raw.guild || '',
+      online: raw.online !== false,
+      source: 'room',
+      // uidReal=false 表示 uid 是"昵称哈希占位",不是真实用户ID(不能用于发送)
+      uidReal: isReal,
+      ts: raw.ts || t,
+      time: new Date(raw.ts || t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+    };
+    // 同 uid 覆盖(保留最新信息);否则新增
+    const idx = STATE.records.findIndex(r => r.uid === uid && dateStr(new Date(r.ts)) === dateStr(new Date(rec.ts)));
+    if (idx >= 0) {
+      // 若已有记录是真实 uid,不要被占位 uid 覆盖
+      if (STATE.records[idx].uidReal === false && rec.uidReal === true) {
+        STATE.records.splice(idx, 1);
+        STATE.records.unshift(rec);
+        updated++;
+        continue;
+      }
+      STATE.records[idx] = { ...STATE.records[idx], ...rec, uidReal: STATE.records[idx].uidReal || rec.uidReal };
+      updated++;
+    } else {
+      STATE.records.unshift(rec);
+      added++;
+    }
+  }
+  STATE.records.sort((a, b) => b.ts - a.ts);
+  if (STATE.records.length > 800) STATE.records.length = 800;
+
+  STATE.source = 'room';
+  STATE.lastCollectAt = now;
+  STATE.lastCollectRoom = (meta && meta.room) || STATE.lastCollectRoom;
+  STATE.collectError = null;
+  STATE.lastEventAt = now;
+
+  if (STATE.streamCallback) {
+    STATE.streamCallback({ type: 'batch', payload: { added, updated, source: 'room', room: STATE.lastCollectRoom, at: now } });
+    STATE.streamCallback({ type: 'stats', payload: getStats() });
+  }
+  return { added, updated, total: STATE.records.length };
+}
+
+// 采集器报告一次错误(供界面提示)
+function reportCollectError(msg) {
+  STATE.collectError = msg ? String(msg) : null;
+  if (STATE.streamCallback) {
+    STATE.streamCallback({ type: 'collect-status', payload: { error: STATE.collectError, at: Date.now() } });
+  }
+}
+
+// 采集器报告"正在采集的房间"(即使本轮没抓到用户也刷新)
+function reportCollectRoom(roomName) {
+  if (roomName) STATE.lastCollectRoom = roomName;
+  STATE.lastCollectAt = Date.now();
+  if (STATE.streamCallback) {
+    STATE.streamCallback({ type: 'collect-status', payload: { room: STATE.lastCollectRoom, at: STATE.lastCollectAt } });
+  }
+}
+
+// ===== 清除虚拟(演示)数据 =====
+// 只删 source==='demo' 的记录,保留真实采集的数据。
+// @param {boolean} all  true = 连真实数据一起清空
+// 返回 { removed, kept }
+function clearDemoRecords(all = false) {
+  const before = STATE.records.length;
+  if (all) {
+    STATE.records = [];
+  } else {
+    STATE.records = STATE.records.filter(r => r.source !== 'demo');
+  }
+  const removed = before - STATE.records.length;
+  // 既然用户要清虚拟数据,就把数据源切到真实模式(避免演示流又生成新假数据)
+  if (!all) {
+    STATE.source = 'room';
+    STATE.sourcePref = { source: 'room' };
+    if (STATE.sourceFile) saveJson(STATE.sourceFile, STATE.sourcePref);
+    if (STATE.timer) { clearInterval(STATE.timer); STATE.timer = null; }
+  }
+  if (STATE.streamCallback) {
+    STATE.streamCallback({ type: 'cleared', payload: { removed, kept: STATE.records.length, all: !!all } });
+    STATE.streamCallback({ type: 'stats', payload: getStats() });
+  }
+  return { removed, kept: STATE.records.length };
+}
+
+// 切换数据源模式:'demo'(模拟流) | 'room'(真实采集)
+// 切到 room 时停掉演示定时器;切回 demo 时重启
+function setSource(mode) {
+  const next = mode === 'room' ? 'room' : 'demo';
+  // 持久化,重启后保持
+  STATE.sourcePref = { source: next };
+  if (STATE.sourceFile) saveJson(STATE.sourceFile, STATE.sourcePref);
+
+  if (next === STATE.source) {
+    if (next === 'demo' && !STATE.timer) startDemoStream();
+    return STATE.source;
+  }
+  STATE.source = next;
+  if (next === 'room') {
+    if (STATE.timer) { clearInterval(STATE.timer); STATE.timer = null; }
+    // 清掉历史演示数据(来源标记 demo)
+    clearDemoRecords(false);
+  } else {
+    if (!STATE.timer) startDemoStream();
+  }
+  if (STATE.streamCallback) {
+    STATE.streamCallback({ type: 'source', payload: { source: STATE.source } });
+    STATE.streamCallback({ type: 'stats', payload: getStats() });
+  }
+  return STATE.source;
+}
+
 // ===== 面板查询 =====
 function getDates() {
   const dates = [];
@@ -175,10 +328,13 @@ function getDates() {
 function getStats() {
   const female = STATE.records.filter(r => r.sex === 'female').length;
   const male = STATE.records.filter(r => r.sex === 'male').length;
+  const realCount = STATE.records.filter(r => r.source === 'room').length;
   return {
     femaleCount: female,
     maleCount: male,
     todayTotal: STATE.records.length,
+    realCount,
+    source: STATE.source,
     updatedAt: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
   };
 }
@@ -242,11 +398,17 @@ function getTargetsByHour(date, hour, gender, guild) {
 }
 
 function getStatus() {
+  const realCount = STATE.records.filter(r => r.source === 'room').length;
   return {
     connected: STATE.connected,
     streaming: !!STATE.timer,
-    mode: 'demo',
+    mode: STATE.source,
+    source: STATE.source,
+    realCount,
     lastEventAt: STATE.lastEventAt,
+    lastCollectAt: STATE.lastCollectAt,
+    lastCollectRoom: STATE.lastCollectRoom,
+    collectError: STATE.collectError,
   };
 }
 
@@ -316,4 +478,6 @@ module.exports = {
   getDates, getStats, getRecords, getSummary, getTargetsByHour, getStatus,
   setStreamCallback, recordSend, getCounts, isSentToday, markSent,
   pushSystemLog, getMachineCode,
+  // 真实数据采集
+  ingestRealRecords, reportCollectError, reportCollectRoom, setSource, clearDemoRecords,
 };

@@ -135,9 +135,17 @@
           <select id="guestDateSel" class="guest-date-sel" title="切换数据日期"></select>
           <input type="text" id="guestKw" class="guest-kw" placeholder="搜索 昵称 / ID / 房间" />
           <span class="grow" style="flex:1"></span>
-          <span class="portal-live">
+          <button class="guest-clear-btn" id="guestClearBtn" title="清除所有通过演示/模拟生成的虚拟用户,仅保留真实采集的数据">
+            <span class="material-symbols-outlined">delete_sweep</span>
+            <span>清除虚拟数据</span>
+          </button>
+          <button class="guest-collect-btn" id="guestCollectBtn" title="自动进入模拟器中的语音房间,持续采集真实在线用户">
+            <span class="material-symbols-outlined">sensors</span>
+            <span id="guestCollectBtnText">开始实时采集</span>
+          </button>
+          <span class="portal-live" id="portalLiveBox">
             <span class="portal-live-dot"></span>
-            <span id="portalLiveText">实时流</span>
+            <span id="portalLiveText">演示数据</span>
           </span>
         </section>
 

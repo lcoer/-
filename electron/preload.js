@@ -35,14 +35,26 @@ contextBridge.exposeInMainWorld('api', {
     getRecords: (date, sex, page, size) => ipcRenderer.invoke('portal:getRecords', date, sex, page, size),
     // 获取整点汇总(按小时聚合的 ID 列表) → { ok, hourly:[...] }
     getSummary: (date) => ipcRenderer.invoke('portal:getSummary', date),
-    // 连接状态 → { connected, mode, lastEventAt }
+    // 连接状态 → { connected, source, realCount, lastCollectAt, lastCollectRoom, collectError, ... }
     getStatus: () => ipcRenderer.invoke('portal:getStatus'),
-    // 实时事件订阅(SSE 风格) callback(ev), ev={type:'record'|'stats', payload}
+    // 清除虚拟(演示)数据:all=false 只清演示数据,all=true 全部清空
+    clearDemo: (all) => ipcRenderer.invoke('portal:clearDemo', !!all),
+    // 实时事件订阅(SSE 风格) callback(ev), ev={type:'record'|'batch'|'stats'|'source'|'collect-status', payload}
     onStream: (cb) => {
       const handler = (_e, ev) => cb(ev);
       ipcRenderer.on('portal:stream', handler);
       return () => ipcRenderer.removeListener('portal:stream', handler);
     },
+  },
+
+  // ===== 房间实时数据采集(真实数据源) =====
+  collect: {
+    // 启动采集 → { ok, intervalMs } | { ok:false, reason }
+    start: (opts) => ipcRenderer.invoke('collect:start', opts || {}),
+    // 停止采集 → { ok, rounds }
+    stop: () => ipcRenderer.invoke('collect:stop'),
+    // 状态 → { ok, running, rounds, intervalMs, room, source }
+    status: () => ipcRenderer.invoke('collect:status'),
   },
 
   // ===== 任务控制(私聊/欢迎/打call) =====

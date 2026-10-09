@@ -53,22 +53,35 @@ function findAdb() {
   return 'adb'; // 交给 PATH
 }
 
+// 从 `adb devices` 输出里挑一个可用串号
+// 优先 emulator-xxxx(本地 emulator 通道,最稳),其次 127.0.0.1:xxxx
+function pickSerial(stdout) {
+  const lines = String(stdout || '').split(/\r?\n/).filter(l => /\bdevice\b/.test(l) && !/offline/.test(l));
+  const serials = lines.map(l => (l.match(/^(\S+)/) || [])[1]).filter(Boolean);
+  const emu = serials.find(s => s.startsWith('emulator-'));
+  if (emu) return emu;
+  const loop = serials.find(s => s.includes('127.0.0.1'));
+  return loop || serials[0] || null;
+}
+
 // 快速探测模拟器是否在线(避免每次都跑完整流程)
 async function probeEmulator(adbPath) {
+  // 注意:这里刻意 *不* 主动 start-server。后台反复 start-server 会与其它 ADB
+  // 调用(包检测/无障碍检测/任务驱动)抢会话,导致 devices 列表瞬时为空 →
+  // 上层误判"模拟器未连接/应用未安装"。start-server 只在 ensureClient 里做一次。
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { stdout } = await execFileAsync(adbPath, ['devices'], { timeout: 10000 });
+      const serial = pickSerial(stdout);
+      if (serial) return serial;
+    } catch { /* 本轮探测失败,重试 */ }
+    if (attempt === 0) await delay(400);
+  }
+  // 兜底:尝试 connect 一次再查
   try {
-    await execFileAsync(adbPath, ['start-server'], { timeout: 20000 }).catch(() => {});
-    const { stdout } = await execFileAsync(adbPath, ['devices'], { timeout: 10000 });
-    const lines = stdout.split(/\r?\n/).filter(l => /\bdevice\b/.test(l) && !/offline/.test(l));
-    for (const l of lines) {
-      const m = l.match(/^(\S+)/);
-      if (m && (m[1].startsWith('emulator-') || m[1].includes('127.0.0.1'))) return m[1];
-    }
-    // 试着 connect
     await execFileAsync(adbPath, ['connect', '127.0.0.1:5555'], { timeout: 10000 }).catch(() => {});
-    const { stdout: s2 } = await execFileAsync(adbPath, ['devices'], { timeout: 10000 });
-    const l2 = s2.split(/\r?\n/).filter(l => /\bdevice\b/.test(l) && !/offline/.test(l));
-    const m2 = l2.map(x => x.match(/^(\S+)/)).filter(Boolean);
-    if (m2.length) return m2[0][1];
+    const { stdout } = await execFileAsync(adbPath, ['devices'], { timeout: 10000 });
+    return pickSerial(stdout);
   } catch { /* 探测失败 */ }
   return null;
 }
@@ -107,6 +120,8 @@ async function ensureClient(opts = {}) {
 
   const adbPath = findAdb();
   onLog('info', `检测模拟器(adb: ${adbPath})...`);
+  // 只在真正要连接时执行一次 start-server,之后探测都只是读 devices
+  try { await execFileAsync(adbPath, ['start-server'], { timeout: 20000 }); } catch { /* 忽略 */ }
   const serial = await probeEmulator(adbPath);
 
   if (!serial) {

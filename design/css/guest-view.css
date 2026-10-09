@@ -6,11 +6,38 @@
 }
 .guest-date-sel { width: auto; min-width: 130px; font-size: 12.5px; padding: 7px 30px 7px 12px; }
 .guest-kw { width: 220px; flex-shrink: 0; }
-.portal-live { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--success); }
+.portal-live { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--tertiary-c); }
 .portal-live-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--success);
-  animation: pulse 1.8s ease-in-out infinite;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--tertiary-c);
 }
+.portal-live.is-real { color: var(--success); }
+.portal-live.is-real .portal-live-dot { background: var(--success); animation: pulse 1.8s ease-in-out infinite; }
+
+/* 开始/停止实时采集按钮 */
+.guest-collect-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: var(--radius-sm);
+  background: var(--primary); color: #fff; border: 1px solid transparent;
+  font-size: 12.5px; font-weight: 600; cursor: pointer;
+  transition: background .15s, opacity .15s;
+}
+.guest-collect-btn:hover { opacity: .9; }
+.guest-collect-btn:disabled { opacity: .55; cursor: not-allowed; }
+.guest-collect-btn .material-symbols-outlined { font-size: 17px; }
+.guest-collect-btn.active { background: var(--error, #e5534b); }
+
+/* 清除虚拟数据按钮 */
+.guest-clear-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--tertiary-c);
+  border: 1px solid var(--outline);
+  font-size: 12.5px; font-weight: 500; cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.guest-clear-btn:hover { background: var(--surface-2); color: var(--on-s); border-color: var(--outline-strong, var(--outline)); }
+.guest-clear-btn:disabled { opacity: .55; cursor: not-allowed; }
+.guest-clear-btn .material-symbols-outlined { font-size: 17px; }
 
 .guest-grid {
   display: grid;
@@ -44,6 +71,7 @@
 .guest-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
 .guest-row-label { color: var(--tertiary-c); }
 .guest-row-value { color: var(--on-s); font-family: var(--mono); font-size: 11.5px; }
+.guest-row-value.muted { color: var(--tertiary-c); font-family: inherit; font-size: 11px; }
 .guest-tags { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
 .guest-tag {
   font-size: 10.5px; padding: 2px 8px; border-radius: 20px;
@@ -52,6 +80,9 @@
 .guest-tag.female { background: rgba(255,107,157,.14); color: var(--color-female); }
 .guest-tag.male { background: rgba(78,168,255,.14); color: var(--color-male); }
 .guest-tag.guild { background: rgba(245,181,68,.14); color: var(--gold); }
+.guest-tag.real { background: rgba(34,197,94,.15); color: var(--success, #16a34a); }
+.guest-avatar.unknown { background: linear-gradient(135deg, #9aa4b2, #b7c0cc); }
+.guest-tag.unknown { background: var(--surface-2); color: var(--tertiary-c); }
 
 /* 分页 */
 .guest-more { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 6px 0 20px; }

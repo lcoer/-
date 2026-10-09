@@ -15,9 +15,13 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // ===== 房间页控件 id(实测,见 docs/阶段1-探测结果.md) =====
 export const ROOM_IDS = {
   publicScreen: 'roomPublicScreen',     // 公屏消息容器
-  msgNickname: 'tv_nickname',           // 公屏消息-发言者
+  publicScreenMore: 'roomPublicScreenMore', // "当前有 N 条新消息"
+  msgNickname: 'tv_nickname',           // 公屏消息-发言者(旧版)
+  msgNicknameAlt: 'nickname',           // 公屏消息-发言者(实测 id)
   msgUserCode: 'tv_user_code',          // 公屏消息-用户ID(形如 (22830141))
+  msgUserCodeAlt: 'tv_nice_num',        // 公屏消息-用户ID(实测 id,纯数字)
   msgContent: 'tv_bubble_content',      // 公屏消息-内容
+  msgContentAlt: 'content',             // 公屏消息-内容(实测 id)
   inputMessage: 'tv_input_message',      // 房间内输入框
   expression: 'iv_input_expression',    // 表情
   gift: 'iv_room_gift',                 // 礼物
@@ -25,7 +29,12 @@ export const ROOM_IDS = {
   roomMore: 'iv_room_more',             // 更多
   seat: 'cl_seat',                      // 麦位
   wheatName: 'tv_wheat_name',           // 麦位昵称
+  wheatScore: 'tvWheatScore',           // 麦位分值
   upSeat: 'up_seat',                     // 上麦
+  roomName: 'tv_room_name',             // 房间名
+  roomCode: 'tv_room_code',             // 房间号(形如 ID:9277)
+  roomHot: 'tv_room_hot',               // 房间热度
+  onlineCount: 'tv_online_count',       // 在线人数(形如 16人)
   follow: 'follow',                      // 关注(用户卡片)
   followText: 'follow_text',
   quit: 'iv_quit',                       // 退出房间
@@ -103,7 +112,10 @@ export class AndroidDriver {
   async _isRoomPage() {
     try {
       const r = await this.adb.sh('dumpsys activity activities');
-      return r.out.includes('RoomPageActivity');
+      // 只看当前前台,不能全串匹配 —— 历史任务栈里会残留 RoomPageActivity 字样,会误判
+      const m = r.out.match(/topResumedActivity=\S+\s+\S+\s+(\S+)/);
+      const top = m ? m[1] : '';
+      return top.includes('RoomPageActivity');
     } catch { return false; }
   }
 

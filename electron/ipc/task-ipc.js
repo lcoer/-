@@ -19,6 +19,10 @@ function registerTaskIpc(ctx) {
   ipcMain.handle('task:resolveNicknames', async (_e, uids) => {
     return await taskRunner.resolveNicknames(Array.isArray(uids) ? uids : []);
   });
-}
 
+  // ===== 房间实时数据采集(真实数据源) =====
+  ipcMain.handle('collect:start', async (_e, opts) => taskRunner.startCollect(opts || {}));
+  ipcMain.handle('collect:stop', async () => taskRunner.stopCollect());
+  ipcMain.handle('collect:status', () => taskRunner.getCollectStatus());
+}
 module.exports = { registerTaskIpc };

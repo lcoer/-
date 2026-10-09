@@ -12,6 +12,12 @@ function registerDataIpc(ctx) {
   ipcMain.handle('portal:getSummary', (_e, date) => ({ ok: true, hourly: dataStore.getSummary(date) }));
   ipcMain.handle('portal:getStatus', () => ({ ok: true, ...dataStore.getStatus() }));
 
+  // 清除虚拟(演示)数据:all=false 只清演示,all=true 全清
+  ipcMain.handle('portal:clearDemo', (_e, all) => {
+    const r = dataStore.clearDemoRecords(!!all);
+    return { ok: true, ...r };
+  });
+
   // 数据流事件 → 渲染进程
   dataStore.setStreamCallback((ev) => {
     const win = ctx.getMainWindow();

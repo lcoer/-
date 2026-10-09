@@ -13,6 +13,9 @@ tmp/
 # ===== 截图/调试产物 =====
 _screenshot*.png
 _shot.mjs
+_verify_*.mjs
+_emu_now.png
+_collected.json
 *.idsig
 
 # ===== APK 编译中间产物(保留 syl-bridge 源码工程 app/ 与 build.sh) =====

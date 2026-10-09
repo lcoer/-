@@ -39,24 +39,26 @@ function registerSystemIpc(ctx) {
     let emulatorConnected = st.mode === 'android' && !!st.serial;
     let bridgeReady = !!st.bridgeReady;
     let appInstalled = emulatorConnected;
+    let serial = st.serial || null;
 
     // 状态可能过期:轻量复检一次(仅当已有 adb 时)
+    // 注意:复检"失败"不等于"已断开"——ADB 会话抖动很常见。只有在确实拿到了
+    // 一个新串号时才用新结果覆盖;拿不到时沿用既有状态,避免界面闪烁成"未连接"。
     if (st.adbPath) {
       try {
-        const serial = await clientManager.probeEmulator(st.adbPath);
-        emulatorConnected = !!serial;
-        if (serial) {
-          appInstalled = await clientManager.isAppInstalled(st.adbPath, serial);
-          bridgeReady = await clientManager.isBridgeReady(st.adbPath, serial);
-        } else {
-          appInstalled = false; bridgeReady = false;
+        const probed = await clientManager.probeEmulator(st.adbPath);
+        if (probed) {
+          serial = probed;
+          emulatorConnected = true;
+          appInstalled = await clientManager.isAppInstalled(st.adbPath, probed);
+          bridgeReady = await clientManager.isBridgeReady(st.adbPath, probed);
         }
       } catch { /* 复检失败沿用旧状态 */ }
     }
 
     return {
       emulatorConnected,
-      serial: emulatorConnected ? (st.serial || null) : null,
+      serial: emulatorConnected ? serial : null,
       adbPath: st.adbPath || null,
       bridgeReady,
       appInstalled,

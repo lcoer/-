@@ -31,6 +31,7 @@ const modulePath = (name) => pathToFileURL(path.join(SRC_DIR, name)).href;
 let driver = null;        // AndroidDriver 实例
 let driverInfo = null;    // { mode, adbPath, serial, bridgeReady }
 let demoMode = false;
+let collector = null;     // RoomCollector 实例(房间实时数据采集)
 
 const tasks = {
   private: { running: false, stopFlag: false, stats: { sent: 0, ok: 0, fail: 0 }, loop: null },
@@ -505,4 +506,56 @@ async function resolveNicknames(uids = []) {
   }
 }
 
-module.exports = { start, stop, stopAll, getStatus, setLogCallback, setStatusCallback, refreshDriver, resolveNicknames };
+// ===== 房间实时数据采集 =====
+// 进入房间 → 周期读控件树 → 抽取在线用户 → 写入 data-store(替换演示数据)
+async function startCollect({ intervalMs, roomName } = {}) {
+  if (collector && collector.getStatus().running) {
+    return { ok: false, reason: 'ALREADY_RUNNING' };
+  }
+  // 私聊任务会占用界面(反复进会话),与采集器互斥
+  if (tasks.private.running) {
+    return { ok: false, reason: 'BUSY: 私聊任务运行中,请先停止再开启采集' };
+  }
+  try {
+    const drv = await ensureDriver();
+    if (!drv) return { ok: false, reason: 'DEMO_MODE: 演示模式下无法采集真实房间数据(请先连接模拟器)' };
+
+    const { RoomCollector } = await import(modulePath('room-collector.mjs'));
+    collector = new RoomCollector(drv, {
+      intervalMs: Number(intervalMs) || appConfig.dataFeed.sampleIntervalMs,
+      roomName: roomName || null,
+      onLog: (level, msg) => log('collect', level, msg),
+      onUsers: (users, meta) => {
+        const r = dataStore.ingestRealRecords(users, meta);
+        if (r.added || r.updated) {
+          log('collect', 'ok', `入库: 新增 ${r.added} / 更新 ${r.updated}(当前 ${r.total})`);
+        }
+      },
+      onRoom: (room) => { try { dataStore.reportCollectRoom(room); } catch { /* 忽略 */ } },
+      onError: (msg) => { try { dataStore.reportCollectError(msg); } catch { /* 忽略 */ } },
+    });
+    dataStore.setSource('room');
+    const r = await collector.start({ intervalMs: Number(intervalMs) || undefined });
+    log('collect', 'ok', `房间实时采集已启动(每 ${(intervalMs || appConfig.dataFeed.sampleIntervalMs) / 1000}s 一轮)`);
+    return { ok: true, ...r };
+  } catch (e) {
+    log('collect', 'fail', `启动采集失败: ${e.message}`);
+    return { ok: false, reason: e.message };
+  }
+}
+
+async function stopCollect() {
+  if (collector) {
+    const r = await collector.stop();
+    log('collect', 'info', `房间实时采集已停止(共 ${r.rounds} 轮)`);
+    return { ok: true, ...r };
+  }
+  return { ok: true, rounds: 0 };
+}
+
+function getCollectStatus() {
+  const base = collector ? collector.getStatus() : { running: false, rounds: 0 };
+  return { ok: true, ...base, source: dataStore.getStatus().source };
+}
+
+module.exports = { start, stop, stopAll, getStatus, setLogCallback, setStatusCallback, refreshDriver, resolveNicknames, startCollect, stopCollect, getCollectStatus };
