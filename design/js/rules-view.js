@@ -29,15 +29,16 @@ const RulesView = (function () {
     }
     if (gender === 'f') list = list.filter(p => p.sex === 'female');
     if (gender === 'm') list = list.filter(p => p.sex === 'male');
-    if (guild === 'has') list = list.filter(p => p.guild);
-    if (guild === 'none') list = list.filter(p => !p.guild);
+    if (guild === 'has') list = list.filter(p => p.guildKnown && p.guild);
+    if (guild === 'none') list = list.filter(p => p.guildKnown && !p.guild);
     return list;
   }
 
   function renderPreview() {
     const list = filterPreview(cloudHourSel.value, filterGender, filterGuild);
 
-    cloudIdCount.textContent = `${list.length} 个 ID`;
+    const unresolved = list.filter(p => p.uidReal === false || p.source === 'demo').length;
+    cloudIdCount.textContent = `${list.length} 条记录 · ${unresolved} 条演示或仅昵称（真实任务不可发送）`;
     if (list.length === 0) {
       cloudIdPreview.innerHTML = '<span style="color:var(--muted)">该时段暂无匹配的 ID</span>';
       return;
@@ -46,13 +47,20 @@ const RulesView = (function () {
       `<span class="id-chip ${p.sex}">${escapeHtml(p.uid)}</span>`).join('');
   }
 
-  async function loadCloudData() {
+  async function loadCloudData(selectedHour = 'auto') {
     const res = await api.portal.getSummary(cloudDateSel.value);
     hourly = Array.isArray(res) ? res : (res?.hourly || []);
     const opts = [{ value: 'auto', label: '自动(全部时段)' }];
     for (const h of currentHourLabels()) opts.push({ value: h.value, label: `${h.label}(${h.count})` });
     cloudHourSel.innerHTML = opts.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
-    cloudHourSel.value = 'auto';
+    // 保留已保存的小时；该时段已无数据时保留一个空选项，避免扩大目标范围。
+    if (!opts.some(o => o.value === selectedHour)) {
+      const option = document.createElement('option');
+      option.value = selectedHour;
+      option.textContent = `${selectedHour} 时（暂无记录）`;
+      cloudHourSel.appendChild(option);
+    }
+    cloudHourSel.value = selectedHour;
     renderPreview();
   }
 
@@ -66,19 +74,22 @@ const RulesView = (function () {
     return filterPreview(cloudHourSel.value, filterGender, filterGuild).map(p => p.uid);
   }
 
-  // 新版:返回带昵称的目标列表(Android 真实模式按昵称定位会话)
+  // 返回按 UID 搜索的目标列表，昵称仅用于展示。
   // 返回 [{ uid, nickname }]
-  async function getTargets() {
+  async function getTargets({ demo = false } = {}) {
+    const { parseLocalTargets, normalizeTargets } = await import('/engine/target-policy.mjs');
     const source = $$('input[name="source"]').find(r => r.checked)?.value || 'cloud';
     if (source === 'local') {
-      // 本地列表:每行支持 "uid" 或 "uid,昵称" 或 "uid 昵称"
-      return localIdList.value.split('\n').map(s => s.trim()).filter(Boolean).map(line => {
-        const m = line.split(/[,\s，]+/).filter(Boolean);
-        return { uid: m[0], nickname: m[1] || null };
-      });
+      return parseLocalTargets(localIdList.value);
     }
-    return filterPreview(cloudHourSel.value, filterGender, filterGuild)
-      .map(p => ({ uid: p.uid, nickname: p.nickname || null }));
+    // Fetch a fresh snapshot while retaining the selected hour.
+    const res = await api.portal.getSummary(cloudDateSel.value);
+    hourly = Array.isArray(res) ? res : (res?.hourly || []);
+    renderPreview();
+    const list = filterPreview(cloudHourSel.value, filterGender, filterGuild);
+    const checked = normalizeTargets(list, { demo });
+    if (checked.rejected.length) toast(`已排除 ${checked.rejected.length} 条演示或未核验身份记录`, 'info');
+    return checked.targets;
   }
 
   function readForm() {
@@ -89,15 +100,24 @@ const RulesView = (function () {
       cloudGender: filterGender,
       cloudGuild: filterGuild,
       localIdList: localIdList.value,
-      delayMin: Number(document.getElementById('delayMin').value) || 15,
-      delayMax: Number(document.getElementById('delayMax').value) || 40,
+      delayMin: Number(document.getElementById('delayMin').value),
+      delayMax: Number(document.getElementById('delayMax').value),
       noDuplicate: document.getElementById('optNoDuplicate').checked,
-      sendLimit: Number(document.getElementById('sendLimit').value) || 0,
+      sendLimit: Number(document.getElementById('sendLimit').value),
     };
   }
 
   function applyForm(r) {
     if (!r) return;
+    if (r.cloudDate) {
+      if (!Array.from(cloudDateSel.options).some(o => o.value === r.cloudDate)) {
+        const option = document.createElement('option');
+        option.value = r.cloudDate;
+        option.textContent = `${r.cloudDate}（暂无记录）`;
+        cloudDateSel.appendChild(option);
+      }
+      cloudDateSel.value = r.cloudDate;
+    }
     $$('input[name="source"]').forEach(el => { el.checked = el.value === (r.source || 'cloud'); });
     toggleSource(r.source);
     localIdList.value = r.localIdList || '';
@@ -131,11 +151,11 @@ const RulesView = (function () {
     cloudDateSel.innerHTML = dates.dates.map(d =>
       `<option value="${d}"${d === dates.today ? ' selected' : ''}>${d}${d === dates.today ? ' (今天)' : ''}</option>`).join('');
 
-    await loadCloudData();
     applyForm(cfg);
+    await loadCloudData(cfg?.cloudHour || 'auto');
 
     // 事件绑定
-    $$('input[name="source"]').forEach(el => el.addEventListener('change', () => toggleSource(el.value)));
+    $$('input[name="source"]').forEach(el => el.addEventListener('change', () => { toggleSource(el.value); save(false); }));
     cloudDateSel.addEventListener('change', async () => { await loadCloudData(); save(false); });
     cloudHourSel.addEventListener('change', () => { renderPreview(); save(false); });
 
@@ -201,7 +221,7 @@ const RulesView = (function () {
         // 回填:能解析到的写成 "uid,昵称",解析不到的保留原 uid
         const outLines = raw.map(line => {
           const uid = line.split(/[,\s，]+/)[0];
-          return map[uid] ? `${uid},${map[uid]}` : uid;
+          return map[uid] ? `${uid},${map[uid]}` : line;
         });
         localIdList.value = outLines.join('\n');
         await save(false);
@@ -224,8 +244,11 @@ const RulesView = (function () {
 
   async function save(notify) {
     const data = readForm();
-    await api.config.set('rules', data);
-    if (notify) toast('规则配置已保存', 'ok');
+    try {
+      const res = await api.config.set('rules', data);
+      if (!res?.ok) throw Error(res?.reason || '保存失败');
+      if (notify) toast('规则配置已保存', 'ok');
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   return { init, getTargetIds, getTargets, readForm };

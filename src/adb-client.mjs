@@ -13,6 +13,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,33 +34,41 @@ const DEFAULTS = {
   adbIme: 'com.android.adbkeyboard/.AdbIME',
   nativeIme: 'com.android.inputmethod.pinyin/.InputService',
   adbImePkg: 'com.android.adbkeyboard',
+  serialCacheMs: 5000,
 };
 
 export class AdbClient {
   constructor(opts = {}) {
     this.cfg = { ...DEFAULTS, ...opts };
+    this._pinnedSerial = Object.hasOwn(opts,'serial') && !!opts.serial;
     this._serverReady = false;
     this._resolvedSerial = null;
+    this._serialCheckedAt = 0;
     this._tmpDir = path.join(os.tmpdir(), 'syl-adb');
     // 可选:无障碍桥接客户端(用于 uiautomator 失败的页面,如游戏/动效页)
     this.bridge = null;
     try { fs.mkdirSync(this._tmpDir, { recursive: true }); } catch {}
   }
 
+  setSignal(signal) { this.signal = signal; return this; }
+
   // 注入桥接客户端:此后 dumpUi 在 uiautomator 失败时会自动改用桥接
   setBridge(bridge) { this.bridge = bridge; return this; }
 
   // 执行 adb 命令(直接 spawn,不经 shell → 避免一切路径/引号问题)
-  async adb(args, { timeout = 20000, allowFail = false } = {}) {
+  async adb(args, { timeout = 20000, allowFail = false, signal = this.signal } = {}) {
+    throwIfAborted(signal);
     try {
       const { stdout, stderr } = await execFileAsync(this.cfg.adbPath, args, {
         timeout,
+        signal,
         maxBuffer: 20 * 1024 * 1024,
         windowsHide: true,
         encoding: 'utf8',
       });
       return { ok: true, out: (stdout || '').trim(), err: (stderr || '').trim() };
     } catch (e) {
+      if (isAbortError(e) || signal?.aborted) { throwIfAborted(signal); throw e; }
       if (allowFail) return { ok: false, out: (e.stdout || '').trim(), err: (e.stderr || e.message || '').trim() };
       throw new Error(`ADB_FAIL(${args.join(' ')}): ${(e.stderr || e.message || '').trim()}`);
     }
@@ -67,46 +76,59 @@ export class AdbClient {
 
   // 设备维度命令
   async sh(cmd, opts = {}) {
-    const serial = await this.serial();
+    const serial = await this.serial({signal: opts.signal === undefined ? this.signal : opts.signal});
     return this.adb(['-s', serial, 'shell', cmd], opts);
   }
 
   // ===== 连接管理 =====
   // 确保 adb server 存活 + 目标设备在线;返回可用 serial
-  async serial() {
-    if (this._resolvedSerial && await this.isOnline(this._resolvedSerial)) {
+  async serial({signal = this.signal} = {}) {
+    throwIfAborted(signal);
+    // Every command still names this exact serial. A short cache avoids an
+    // extra adb devices process before each tap, read and broadcast.
+    if (this._resolvedSerial && Date.now() - this._serialCheckedAt < this.cfg.serialCacheMs)
+      return this._resolvedSerial;
+    if (this._resolvedSerial && await this.isOnline(this._resolvedSerial, {signal})) {
+      this._serialCheckedAt = Date.now();
       return this._resolvedSerial;
     }
-    await this.ensureServer();
+    await this.ensureServer({signal});
 
     // 先试 emulator-5554
-    if (await this.isOnline(this.cfg.serial)) {
+    if (await this.isOnline(this.cfg.serial, {signal})) {
       this._resolvedSerial = this.cfg.serial;
+      this._serialCheckedAt = Date.now();
       return this._resolvedSerial;
     }
+    if (this._pinnedSerial) throw new Error(`EMULATOR_OFFLINE: 已选择的设备 ${this.cfg.serial} 不在线`);
     // 再试 127.0.0.1:5555
-    await this.adb(['connect', `127.0.0.1:${this.cfg.connectPort}`], { allowFail: true });
-    if (await this.isOnline(this.cfg.fallbackSerial)) {
+    await this.adb(['connect', `127.0.0.1:${this.cfg.connectPort}`], { allowFail: true, signal });
+    if (await this.isOnline(this.cfg.fallbackSerial, {signal})) {
       this._resolvedSerial = this.cfg.fallbackSerial;
+      this._serialCheckedAt = Date.now();
       return this._resolvedSerial;
     }
-    if (await this.isOnline(this.cfg.serial)) {
+    if (await this.isOnline(this.cfg.serial, {signal})) {
       this._resolvedSerial = this.cfg.serial;
+      this._serialCheckedAt = Date.now();
       return this._resolvedSerial;
     }
     throw new Error('EMULATOR_OFFLINE: 未找到在线的模拟器设备(请确认雷电模拟器已启动)');
   }
 
-  async ensureServer() {
-    await this.adb(['start-server'], { timeout: 30000, allowFail: true });
+  async ensureServer({signal = this.signal} = {}) {
+    await this.adb(['start-server'], { timeout: 30000, allowFail: true, signal });
     this._serverReady = true;
   }
 
-  async isOnline(serial) {
+  async isOnline(serial, {signal = this.signal} = {}) {
     try {
-      const r = await this.adb(['devices'], { timeout: 10000 });
-      return r.out.split(/\r?\n/).some(l => l.startsWith(serial) && /\bdevice\b/.test(l) && !/offline/.test(l));
-    } catch { return false; }
+      const r = await this.adb(['devices'], { timeout: 10000, signal });
+      return r.out.split(/\r?\n/).some(line => {
+        const [candidate, state] = line.trim().split(/\s+/);
+        return candidate === serial && state === 'device';
+      });
+    } catch (e) { if (isAbortError(e)) throw e; return false; }
   }
 
   async devices() {
@@ -121,7 +143,7 @@ export class AdbClient {
       const serial = await this.serial();
       const r = await this.sh('echo pong');
       return r.out.includes('pong');
-    } catch { return false; }
+    } catch (e) { if (isAbortError(e)) throw e; return false; }
   }
 
   // 模拟器可执行文件是否存在
@@ -134,7 +156,7 @@ export class AdbClient {
     try {
       const r = await this.sh(`pm list packages ${this.cfg.appPackage}`);
       return r.out.includes(this.cfg.appPackage);
-    } catch { return false; }
+    } catch (e) { if (isAbortError(e)) throw e; return false; }
   }
 
   async isAppForeground() {
@@ -142,7 +164,7 @@ export class AdbClient {
       const r = await this.sh('dumpsys activity activities');
       const m = r.out.match(/topResumedActivity.*?\s([\w.]+)\/([\w.$]+)/);
       return m ? m[1] : null;
-    } catch { return null; }
+    } catch (e) { if (isAbortError(e)) throw e; return null; }
   }
 
   // 拉起应用并等待到达前台(优先 am start 指定 LaunchActivity,比 monkey 可靠)
@@ -152,7 +174,7 @@ export class AdbClient {
     while (Date.now() - start < waitMs) {
       const fg = await this.isAppForeground();
       if (fg === this.cfg.appPackage) return true;
-      await new Promise(r => setTimeout(r, 600));
+      await abortableSleep(600, this.signal);
     }
     return false;
   }
@@ -160,7 +182,7 @@ export class AdbClient {
   // 冷启(先强杀再拉起),用于需要干净状态的场景
   async relaunchApp({ waitMs = 10000 } = {}) {
     await this.sh(`am force-stop ${this.cfg.appPackage}`, { allowFail: true });
-    await new Promise(r => setTimeout(r, 1200));
+    await abortableSleep(1200, this.signal);
     return this.launchApp({ waitMs });
   }
 
@@ -168,7 +190,7 @@ export class AdbClient {
     try {
       const r = await this.sh('dumpsys window | grep -E "mCurrentFocus|mFocusedApp"');
       return r.out;
-    } catch { return ''; }
+    } catch (e) { if (isAbortError(e)) throw e; return ''; }
   }
 
   // ===== 屏幕 =====
@@ -182,7 +204,7 @@ export class AdbClient {
     try {
       const r = await this.sh('dumpsys input_method | grep -E "mInputShown|mIsInputViewShown"');
       return /mInputShown=true|mIsInputViewShown=true/.test(r.out);
-    } catch { return false; }
+    } catch (e) { if (isAbortError(e)) throw e; return false; }
   }
 
   // ===== 输入 =====
@@ -211,7 +233,7 @@ export class AdbClient {
     try {
       const r = await this.sh(`ime list -s`);
       return r.out.includes('com.android.adbkeyboard');
-    } catch { return false; }
+    } catch (e) { if (isAbortError(e)) throw e; return false; }
   }
 
   async switchToAdbIme() {
@@ -233,7 +255,8 @@ export class AdbClient {
   }
 
   async clearInputField() {
-    // 通用清空:聚焦后全选删除(逐字符退格兜底)
+    // ADBKeyboard clears the entire focused field; caller verifies the result.
+    await this.sh('am broadcast -a ADB_CLEAR_TEXT', { allowFail: true });
     await this.sh('input keyevent KEYCODE_MOVE_END', { allowFail: true });
     for (let i = 0; i < 3; i++) {
       await this.sh('input keyevent --longpress KEYCODE_DEL', { allowFail: true });

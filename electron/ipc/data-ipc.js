@@ -3,17 +3,19 @@
 
 const { ipcMain } = require('electron');
 const dataStore = require('../services/data-store');
+const { safeHandle } = require('./safe-handle');
 
 function registerDataIpc(ctx) {
-  ipcMain.handle('portal:getDates', () => ({ ok: true, ...dataStore.getDates() }));
-  ipcMain.handle('portal:getStats', (_e, date) => ({ ok: true, data: dataStore.getStats(date) }));
-  ipcMain.handle('portal:getRecords', (_e, date, sex, page, size) =>
-    ({ ok: true, ...dataStore.getRecords(date, sex, page, size) }));
-  ipcMain.handle('portal:getSummary', (_e, date) => ({ ok: true, hourly: dataStore.getSummary(date) }));
-  ipcMain.handle('portal:getStatus', () => ({ ok: true, ...dataStore.getStatus() }));
+  const handle = safeHandle(ipcMain,ctx);
+  handle('portal:getDates', () => ({ ok: true, ...dataStore.getDates() }));
+  handle('portal:getStats', (_e, date) => ({ ok: true, data: dataStore.getStats(date) }));
+  handle('portal:getRecords', (_e, date, sex, page, size, keyword) =>
+    ({ ok: true, ...dataStore.getRecords(date, sex, page, size, keyword) }));
+  handle('portal:getSummary', (_e, date) => ({ ok: true, hourly: dataStore.getSummary(date) }));
+  handle('portal:getStatus', () => ({ ok: true, ...dataStore.getStatus() }));
 
   // 清除虚拟(演示)数据:all=false 只清演示,all=true 全清
-  ipcMain.handle('portal:clearDemo', (_e, all) => {
+  handle('portal:clearDemo', (_e, all) => {
     const r = dataStore.clearDemoRecords(!!all);
     return { ok: true, ...r };
   });

@@ -57,6 +57,7 @@
     await safeStep('Blacklist', () => Blacklist.init());
     await safeStep('Settings', () => Settings.init());
     await safeStep('TaskConsole', () => TaskConsole.init());
+    api.task.onStatus(GuestView.onTaskStatus);
 
     // 顶部刷新按钮
     const refreshBtn = document.getElementById('refreshBtn');
@@ -74,8 +75,8 @@
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', () => { window.__appReady = init(); });
   } else {
-    init();
+    window.__appReady = init();
   }
 })();

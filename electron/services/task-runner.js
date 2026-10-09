@@ -1,561 +1,440 @@
-// electron/services/task-runner.js - 任务运行器
-// 职责:管理 私聊 / 自动欢迎 / 自动打call 三个自动化任务的生命周期
-//
-// 双模式:
-//   - 真实模式:连接雷电模拟器 + ADB,用无障碍桥接驱动「双鱼部落」Android 应用
-//   - 演示模式:未检测到模拟器/应用时,按同样的节奏与日志流程模拟执行(不真实发送)
-// 两种模式共用同一套任务框架、统计与日志,保证演示体验与真实一致。
-//
-// 【历史变更】原方案用 CDP 接管 Electron 客户端。因「双鱼部落」实为 Android 应用,
-//   Android 无 CDP,已改为 ADB + 无障碍桥接方案(src/adb-client.mjs、android-driver.mjs)。
-
+// Every operation owns the device until its run has completely stopped.
 const path = require('path');
-const fs = require('fs');
 const { pathToFileURL } = require('url');
+const { randomUUID } = require('crypto');
+const { DeviceSession } = require('./device-session');
 const appConfig = require('../config');
-const dataStore = require('./data-store');
-const clientManager = require('./client-manager');
-
-// 傀儡独立 userData 开关
-if (appConfig.syblPuppetAppData) {
-  process.env.SYBL_PUPPET_APPDATA = appConfig.syblPuppetAppData;
+const { isDefinitiveSendRejection } = require('../../src/send-proof.cjs');
+const modulePath = name => pathToFileURL(path.join(__dirname, '..', '..', 'src', name)).href;
+const modules = Promise.all(['task-policy.mjs', 'task-result.mjs'].map(n => import(modulePath(n))));
+function cancelled(signal) {
+  if (signal?.aborted) {
+    const e = Error('任务已取消');
+    e.name = 'AbortError';
+    throw e;
+  }
 }
-
-// src 模块路径(ESM,用 dynamic import 加载)
-const _isPackaged = __dirname.includes('app.asar');
-const SRC_DIR = _isPackaged
-  ? path.join(__dirname, '..', '..', 'src')
-  : path.join(__dirname, '..', '..', 'src');
-const modulePath = (name) => pathToFileURL(path.join(SRC_DIR, name)).href;
-
-let driver = null;        // AndroidDriver 实例
-let driverInfo = null;    // { mode, adbPath, serial, bridgeReady }
-let demoMode = false;
-let collector = null;     // RoomCollector 实例(房间实时数据采集)
-
-const tasks = {
-  private: { running: false, stopFlag: false, stats: { sent: 0, ok: 0, fail: 0 }, loop: null },
-  welcome: { running: false, stopFlag: false, stats: { clicked: 0, skipped: 0 }, pollTimer: null, handle: null },
-  call: { running: false, stopFlag: false, stats: { sent: 0 }, loop: null, handle: null },
-};
-
-let logCallback = null;
-let statusCallback = null;
-function setLogCallback(fn) { logCallback = fn; }
-function setStatusCallback(fn) { statusCallback = fn; }
-
-function log(task, level, msg) {
-  const time = new Date().toLocaleTimeString('zh-CN');
-  console.log(`[${time}][${task}][${level}] ${msg}`);
-  if (logCallback) logCallback({ task, level, msg, time: Date.now() });
-}
-
-function emitStatus() {
-  if (statusCallback) statusCallback(getStatus());
-}
-
-// ===== Android 驱动初始化(懒加载,三任务共用) =====
-async function ensureDriver() {
-  if (driver) return driver;
-  if (demoMode) return null;
-
-  const info = await clientManager.ensureClient({
-    onLog: (level, msg) => log('system', level, msg),
+function sleep(ms, signal) {
+  cancelled(signal);
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      const e = Error('任务已取消');
+      e.name = 'AbortError';
+      reject(e);
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted)
+      abort();
   });
-
-  if (info.demo || info.mode === 'demo') {
-    demoMode = true;
-    log('system', 'info', '演示模式:未检测到雷电模拟器或双鱼部落,任务将以模拟方式运行');
-    return null;
-  }
-
-  driverInfo = info;
-  const { AndroidDriver } = await import(modulePath('android-driver.mjs'));
-  driver = new AndroidDriver({
-    adbOpts: { adbPath: info.adbPath, serial: info.serial },
-    onLog: (level, msg) => log('system', level, msg),
+}
+function untilAbort(signal) {
+  if (signal.aborted)
+    return Promise.resolve();
+  return new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+function createTaskRunner(deps = {}) {
+  const dataStore = deps.dataStore || require('./data-store');
+  const clientManager = deps.clientManager || require('./client-manager');
+  const createDriver = deps.createDriver || (async (info) => {
+    const { AndroidDriver } = await import(modulePath('android-driver.mjs'));
+    return new AndroidDriver({ adbOpts: { adbPath: info.adbPath, serial: info.serial }, onLog: (l, m) => log('system', l, m) });
   });
-
-  log('system', 'info', '正在检查模拟器与无障碍服务...');
-  await driver.ensureReady();
-  log('system', 'ok', `真实模式就绪(设备 ${info.serial}${info.bridgeReady ? ',无障碍桥接可用' : ''})`);
-  return driver;
-}
-
-// 判断当前是否演示模式
-function shouldDemo() {
-  return demoMode || !clientManager.getClientState().serial;
-}
-
-// ===== 私聊任务 =====
-function validatePrivateConfig(config) {
-  if (tasks.private.running) return { ok: false, reason: 'ALREADY_RUNNING' };
-  const targets = config.targets || config.targetIds || [];
-  if (!targets.length) return { ok: false, reason: 'NO_TARGETS' };
-  // Android 端需要昵称才能定位会话(纯 uid 只能靠房间公屏反查)
-  const noNick = targets.filter(t => typeof t !== 'object' || !t.nickname);
-  if (noNick.length === targets.length) {
-    return { ok: false, reason: 'NEED_NICKNAME: 真实模式下需要在目标列表中提供昵称(Android 端无法仅凭 uid 定位会话)' };
-  }
-  return null;
-}
-
-function pickContent(config, generateMessage) {
-  if (config.mode === 'select' && config.contents?.[config.selectedIndex] != null) {
-    return config.contents[config.selectedIndex];
-  }
-  if (config.contents && config.contents.length > 0) {
-    return config.contents[Math.floor(Math.random() * config.contents.length)];
-  }
-  return generateMessage();
-}
-
-// 说明:原 CDP 时代的 sendTargetChain(文字→图片→语音链)已废弃。
-// Android 端目前仅支持"文字"发送(图片/语音待后续版本),逻辑见 sendByNickname()。
-
-// 演示模式的单目标模拟发送
-async function demoSendTarget(cfg, uid, idx, total) {
-  log('private', 'info', `[${idx + 1}/${total}] ${uid} → 正在发送`);
-  const content = cfg.mode === 'mediaonly' ? '' : pickDemoContent(cfg);
-  if (content) {
-    await sleep(400 + Math.random() * 600);
-    log('private', 'info', `  └ 发送结果: code=0, 服务端UID=DEMO-${Date.now()}`);
-    log('private', 'ok', `  文字发送成功`);
-  }
-  if (cfg.image?.enable) {
-    await sleep(cfg.mediaGapMinMs + Math.random() * cfg.mediaGapRangeMs);
-    log('private', 'ok', `  图片发送已确认`);
-  }
-  if (cfg.voice?.enable) {
-    await sleep(cfg.mediaGapMinMs + Math.random() * cfg.mediaGapRangeMs);
-    log('private', 'ok', `  语音发送已确认`);
-  }
-  return true;
-}
-
-function pickDemoContent(cfg) {
-  if (cfg.mode === 'select' && cfg.contents?.[cfg.selectedIndex] != null) return cfg.contents[cfg.selectedIndex];
-  if (cfg.contents && cfg.contents.length) return cfg.contents[Math.floor(Math.random() * cfg.contents.length)];
-  return '你好呀~';
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-// ===== 真实模式:向单个目标发私聊(Android 实现) =====
-// 说明:Android 侧不支持"按 uid 直接发送"。需要 uid → 昵称 的映射
-//       (来自目标列表里的昵称,或房间公屏上的 uid↔昵称对应)。
-async function sendTargetAndroid(cfg, drv, target) {
-  // target 可能是 uid 字符串,也可能是 { uid, nickname }
-  const nickname = typeof target === 'object' ? target.nickname : null;
-  const uid = typeof target === 'object' ? target.uid : target;
-
-  if (!nickname) {
-    // 尝试通过房间公屏反查(需在房间内)
+  const createCollector = deps.createCollector || (async (drv, opts) => {
+    const { RoomCollector } = await import(modulePath('room-collector.mjs'));
+    return new RoomCollector(drv, opts);
+  });
+  const session = new DeviceSession(), tasks = new Map();
+  let logCallback = null, statusCallback = null, collector = null, collectorRunId = null, statusRevision = 0;
+  const emptyStats = () => ({
+    sent: 0, ok: 0, fail: 0, unconfirmed: 0, cancelled: 0, skipped: 0, simulated: 0, clicked: 0
+  });
+  for (const name of ['private', 'welcome', 'call', 'collect', 'resolve'])
+    tasks.set(name, { name, state: 'stopped', running: false, stats: emptyStats(), mode: 'android' });
+  function log(task, level, msg) {
     try {
-      const found = await drv.resolveUidToNickname(uid);
-      if (found) {
-        log('private', 'info', `  └ uid ${uid} 反查到昵称: ${found}`);
-        return await sendByNickname(cfg, drv, found, uid);
-      }
-    } catch (e) { /* 不在房间,忽略 */ }
-    log('private', 'fail', `  └ uid ${uid} 缺少昵称映射,无法在 Android 端发送`);
-    return { ok: false, reason: 'NO_NICKNAME_MAPPING' };
+      logCallback?.({ task, level, msg, time: Date.now() });
+    }
+    catch (e) {
+      console.error('日志订阅错误:', e.message);
+    }
+    if (!deps.silent)
+      console.log(`[${task}][${level}] ${msg}`);
   }
-  return await sendByNickname(cfg, drv, nickname, uid);
-}
-
-async function sendByNickname(cfg, drv, nickname, uid) {
-  const content = cfg.mode === 'mediaonly' ? '' : pickContent(cfg, () => '');
-  let allOk = true;
-
-  if (content) {
-    if (cfg.image?.enable || cfg.voice?.enable) {
-      // 有媒体:先发文字建立会话,再逐条补发(媒体仍走原 CDP 逻辑不适用,
-      // Android 端图片/语音发送暂未支持,此处仅发文字并提示)
-      log('private', 'warn', '  └ Android 端暂不支持图片/语音发送,仅发送文字');
+  function emitStatus() {
+    statusRevision++;
+    try {
+      statusCallback?.(getStatus());
     }
-    const r = await drv.sendPrivateMessage(nickname, content, { onLog: (l, m) => log('private', l, `  └ ${m}`) });
-    if (r.ok) log('private', 'ok', `  文字发送成功`);
-    else { allOk = false; log('private', 'fail', `  文字发送失败(未确认)`); }
+    catch (e) {
+      console.error('状态订阅错误:', e.message);
+    }
   }
-  return { ok: allOk, nickname, uid };
-}
-
-async function runPrivateLoop(cfg) {
-  try {
-    const demo = shouldDemo();
-    if (demo) {
-      demoMode = true;
-    } else {
-      await ensureDriver();
+  function getStatus() {
+    const result = {statusRevision};
+    for (const [name, t] of tasks) {
+      const stats = { ...t.stats };
+      if (name === 'private') {
+        Object.assign(stats, dataStore.getCounts(dataStore.getMachineCode(), 'private'));
+        stats.pending = dataStore.getPendingResults ? dataStore.getPendingResults().length : stats.unconfirmed;
+      }
+      if (name === 'collect' && collector && collectorRunId === t.runId)
+        Object.assign(stats, collector.getStatus());
+      result[name] = {
+        running: t.running, state: t.state, runId: t.runId || null, mode: t.mode, stats, error: t.error || null
+      };
     }
-
-    // 目标列表:支持纯 uid 数组,或 { uid, nickname } 数组
-    const rawTargets = cfg.targets || cfg.targetIds || [];
-    const blacklist = new Set((cfg.blacklist || []).map(String));
-    const machineCode = dataStore.getMachineCode();
-
-    log('private', 'info', `${demo ? '[演示模式] ' : ''}私聊任务启动,目标 ${rawTargets.length} 个,黑名单 ${blacklist.size} 个`);
-
-    let consecutiveFail = 0;
-    for (let i = 0; i < rawTargets.length; i++) {
-      if (tasks.private.stopFlag) { log('private', 'info', '私聊任务已停止'); break; }
-      const t = rawTargets[i];
-      const uid = String(typeof t === 'object' ? t.uid : t);
-
-      if (blacklist.has(uid)) { log('private', 'skip', `[${i + 1}/${rawTargets.length}] ${uid} 在黑名单,跳过`); continue; }
-      if (cfg.noDuplicate && dataStore.isSentToday(machineCode, uid)) {
-        log('private', 'skip', `[${i + 1}/${rawTargets.length}] ${uid} 今日已发送,跳过`); continue;
-      }
-
-      log('private', 'info', `[${i + 1}/${rawTargets.length}] 正在处理 ${uid}`);
-      let ok = false;
-      if (demo) {
-        ok = await demoSendTarget(cfg, uid, i, rawTargets.length);
-      } else {
-        const r = await sendTargetAndroid(cfg, driver, t).catch(e => ({ ok: false, reason: e.message }));
-        ok = r.ok;
-        if (!ok) {
-          consecutiveFail++;
-          if (consecutiveFail >= 5) { log('private', 'fail', '连续 5 个目标失败,任务中止'); tasks.private.stopFlag = true; break; }
-        } else consecutiveFail = 0;
-      }
-
-      tasks.private.stats.sent++;
-      if (ok) {
-        tasks.private.stats.ok++;
-        dataStore.markSent(machineCode, uid);
-        dataStore.recordSend(machineCode, 'private');
-        log('private', 'ok', `${uid} 发送成功`);
-        if (cfg.sendLimit > 0 && tasks.private.stats.ok >= cfg.sendLimit) {
-          log('private', 'info', `已达发送上限 ${cfg.sendLimit},自动停止`);
-          tasks.private.stopFlag = true;
-          break;
-        }
-      } else {
-        tasks.private.stats.fail++;
-        log('private', 'fail', `${uid} 发送失败`);
-      }
-      emitStatus();
-
-      if (i < rawTargets.length - 1 && !tasks.private.stopFlag) {
-        const delayMs = cfg.delayMin * 1000 + Math.floor(Math.random() * ((cfg.delayMax - cfg.delayMin) * 1000));
-        const realDelay = demo ? Math.min(delayMs, 2500) : delayMs;
-        log('private', 'info', `等待 ${Math.round(realDelay / 1000)} 秒...`);
-        await sleep(realDelay);
-      }
-    }
-    log('private', 'info', `私聊任务结束,发送 ${tasks.private.stats.sent},成功 ${tasks.private.stats.ok},失败 ${tasks.private.stats.fail}`);
-  } catch (e) {
-    log('private', 'fail', '私聊任务异常: ' + e.message);
-  } finally {
-    tasks.private.running = false;
-    tasks.private.loop = null;
-    log('private', 'ended', '私聊任务已结束');
+    const cs = clientManager.getClientState();
+    result.deviceOwner = session.getStatus();
+    result.mode = result.deviceOwner ? tasks.get(result.deviceOwner.owner)?.mode || cs.mode : cs.mode;
+    result.demoMode = result.mode === 'demo';
+    result.serial = cs.serial || null;
+    result.bridgeReady = !!cs.bridgeReady;
+    result.adbPath = cs.adbPath || null;
+    return result;
+  }
+  function finish(t, error) {
+    if (tasks.get(t.name) !== t)
+      return;
+    t.running = false;
+    t.state = error && error.name !== 'AbortError' ? 'failed' : 'stopped';
+    t.error = t.state === 'failed' ? error.message : null;
+    session.release(t.name, t.runId);
+    log(t.name, 'ended', t.error ? `任务失败: ${t.error}` : '任务已结束');
     emitStatus();
   }
-}
-
-// 说明:原 CDP 时代的 loadPrivateModules / syncAndPreResolve(uid→rongCloudId 预解析)已废弃。
-// Android 端不需要预解析,直接按昵称在消息列表中定位会话。
-
-async function startPrivate(config) {
-  const invalid = validatePrivateConfig(config);
-  if (invalid) return invalid;
-
-  tasks.private.running = true;
-  tasks.private.stopFlag = false;
-  tasks.private.stats = { sent: 0, ok: 0, fail: 0 };
-  emitStatus();
-
-  const cfg = {
-    ...config,
-    mediaGapMinMs: appConfig.taskRunner.mediaGapMinMs,
-    mediaGapRangeMs: appConfig.taskRunner.mediaGapRangeMs,
-  };
-  tasks.private.loop = runPrivateLoop(cfg);
-  return { ok: true };
-}
-
-function stopPrivate() {
-  if (!tasks.private.running) return { ok: false, reason: 'NOT_RUNNING' };
-  tasks.private.stopFlag = true;
-  log('private', 'info', '正在停止私聊任务...');
-  return { ok: true };
-}
-
-// ===== 自动欢迎任务 =====
-async function startWelcome() {
-  if (tasks.welcome.running) return { ok: false, reason: 'ALREADY_RUNNING' };
-  tasks.welcome.running = true;
-  tasks.welcome.stopFlag = false;
-  tasks.welcome.stats = { clicked: 0, skipped: 0 };
-  emitStatus();
-
-  if (shouldDemo()) {
-    demoMode = true;
-    log('welcome', 'info', '[演示模式] 自动欢迎已启动,监听房间新用户');
-    tasks.welcome.pollTimer = setInterval(() => {
-      if (tasks.welcome.stopFlag) return;
-      // 模拟随机进入的新用户
-      if (Math.random() < 0.6) {
-        tasks.welcome.stats.clicked++;
-        log('welcome', 'ok', `已点击欢迎(第 ${tasks.welcome.stats.clicked} 次)`);
-      } else {
-        tasks.welcome.stats.skipped++;
-      }
-      emitStatus();
-    }, 3500);
-    return { ok: true };
-  }
-
-  try {
-    await ensureDriver();
-    const handle = await driver.startAutoWelcome({
-      intervalMs: appConfig.taskRunner.welcomePollIntervalMs,
-      onEvent: (ev) => {
-        if (ev.ok) {
-          tasks.welcome.stats.clicked++;
-          log('welcome', 'ok', `已欢迎: ${ev.key} (第 ${tasks.welcome.stats.clicked} 次)`);
-        } else {
-          tasks.welcome.stats.skipped++;
-        }
-        emitStatus();
-      },
-    });
-    tasks.welcome.handle = handle;
-    log('welcome', 'info', '自动欢迎已启动,监听房间新用户');
-    // 状态同步
-    tasks.welcome.pollTimer = setInterval(() => {
-      if (tasks.welcome.stopFlag) return;
-      const st = handle.getStatus();
-      tasks.welcome.stats.clicked = st.clickedCount || 0;
-      tasks.welcome.stats.skipped = st.skippedCount || 0;
-      emitStatus();
-    }, appConfig.taskRunner.welcomePollIntervalMs);
-    return { ok: true };
-  } catch (e) {
-    tasks.welcome.running = false;
-    log('welcome', 'fail', '启动失败: ' + e.message);
-    return { ok: false, reason: e.message };
-  }
-}
-
-async function stopWelcomeInternal() {
-  if (tasks.welcome.handle) {
-    try {
-      const r = tasks.welcome.handle.stop();
-      log('welcome', 'info', `自动欢迎已停止,点击 ${r.clickedCount},跳过 ${r.skippedCount}`);
-    } catch (e) { log('welcome', 'fail', '停止失败: ' + e.message); }
-    tasks.welcome.handle = null;
-  }
-  if (tasks.welcome.pollTimer) { clearInterval(tasks.welcome.pollTimer); tasks.welcome.pollTimer = null; }
-  tasks.welcome.running = false;
-  tasks.welcome.stopFlag = true;
-  log('welcome', 'ended', '自动欢迎任务已结束');
-  emitStatus();
-}
-
-async function stopWelcome() {
-  if (!tasks.welcome.running) return { ok: false, reason: 'NOT_RUNNING' };
-  await stopWelcomeInternal();
-  return { ok: true };
-}
-
-// ===== 自动打call任务 =====
-async function startCall(config) {
-  if (tasks.call.running) return { ok: false, reason: 'ALREADY_RUNNING' };
-  tasks.call.running = true;
-  tasks.call.stopFlag = false;
-  tasks.call.stats = { sent: 0 };
-  emitStatus();
-
-  tasks.call.loop = (async () => {
-    try {
-      const demo = shouldDemo();
-      if (demo) demoMode = true;
-      else await ensureDriver();
-      const emoji = config.emoji || '打call';
-      const dMin = (config.delayMin || 3) * 1000;
-      const dMax = (config.delayMax || 5) * 1000;
-      log('call', 'info', `${demo ? '[演示模式] ' : ''}自动打call启动,表情: ${emoji}`);
-
-      while (!tasks.call.stopFlag) {
-        if (demo) {
-          log('call', 'ok', `已发送 ${emoji} (第 ${++tasks.call.stats.sent} 次)`);
-        } else {
-          const ok = await driver._sendCallOnce(emoji);
-          if (ok) { tasks.call.stats.sent++; log('call', 'ok', `已发送 ${emoji} (第 ${tasks.call.stats.sent} 次)`); }
-          else log('call', 'fail', `发送失败(未找到${emoji}入口)`);
-        }
-        emitStatus();
-        if (tasks.call.stopFlag) break;
-        const delayMs = dMin + Math.floor(Math.random() * (dMax - dMin));
-        const realDelay = demo ? Math.min(delayMs, 3000) : delayMs;
-        log('call', 'info', `等待 ${Math.round(realDelay / 1000)} 秒...`);
-        await sleep(realDelay);
-      }
-      log('call', 'info', `打call任务已停止,共发送 ${tasks.call.stats.sent} 次`);
-    } catch (e) {
-      log('call', 'fail', '打call任务异常: ' + e.message);
-    } finally {
-      tasks.call.running = false;
-      tasks.call.loop = null;
-      log('call', 'ended', '打call任务已结束');
-      emitStatus();
+  async function readyDriver(t) {
+    // The chosen serial stays fixed for the run; readiness checks never send messages.
+    const signal = t.controller.signal, info = await clientManager.ensureClient({ signal, onLog: (l, m) => log('system', l, m) });
+    cancelled(signal);
+    if (!info || info.mode !== 'android' || !info.serial)
+      throw Error('REAL_MODE_REQUIRED: 请连接模拟器');
+    const drv = await createDriver(info);
+    cancelled(signal);
+    drv.setSignal?.(signal);
+    await drv.ensureReady();
+    if (drv.bridge?.ensureCompatible) {
+      const handshake = await drv.bridge.ensureCompatible({ signal });
+      clientManager.recordBridgeHandshake?.({ ...info, protocolVersion: handshake.protocolVersion });
     }
-  })();
-
-  return { ok: true };
-}
-
-function stopCall() {
-  if (!tasks.call.running) return { ok: false, reason: 'NOT_RUNNING' };
-  tasks.call.stopFlag = true;
-  log('call', 'info', '正在停止打call任务...');
-  return { ok: true };
-}
-
-// ===== 统一接口 =====
-async function start(name, config) {
-  switch (name) {
-    case 'private': return startPrivate(config);
-    case 'welcome': return await startWelcome();
-    case 'call': return await startCall(config);
-    default: return { ok: false, reason: 'UNKNOWN_TASK' };
+    cancelled(signal);
+    t.driver = drv;
+    return drv;
   }
-}
-
-async function stop(name) {
-  switch (name) {
-    case 'private': return stopPrivate();
-    case 'welcome': return await stopWelcome();
-    case 'call': return stopCall();
-    default: return { ok: false, reason: 'UNKNOWN_TASK' };
-  }
-}
-
-async function stopAll() {
-  for (const n of ['private', 'welcome', 'call']) {
-    try { await stop(n); } catch {}
-  }
-}
-
-function getStatus() {
-  const machineCode = dataStore.getMachineCode();
-  const result = {};
-  for (const name of ['private', 'welcome', 'call']) {
-    const stats = { ...tasks[name].stats };
-    if (name === 'private') {
-      const counts = dataStore.getCounts(machineCode, 'private');
-      stats.today = counts.today; stats.week = counts.week; stats.month = counts.month;
-    }
-    result[name] = { running: tasks[name].running, stats };
-  }
-  const cs = clientManager.getClientState();
-  result.demoMode = demoMode || shouldDemo();
-  result.mode = cs.mode;                 // 'android' | 'demo'
-  result.serial = cs.serial || null;
-  result.bridgeReady = !!cs.bridgeReady;
-  result.adbPath = cs.adbPath || null;
-  return result;
-}
-
-// 供 IPC 主动查询/重连模拟器
-async function refreshDriver() {
-  driver = null;
-  driverInfo = null;
-  demoMode = false;
-  return await ensureDriver().then(() => getStatus()).catch(e => ({ error: e.message }));
-}
-
-// ===== 昵称解析:把纯 uid 列表补全为 {uid, nickname} =====
-// 真实模式下 Android 会话列表只显示昵称,无法凭 uid 定位。
-// 本函数遍历模拟器里的会话(含陌生人分组),逐个进主页读取 uid↔昵称 映射,
-// 再用该映射回填用户提供的 uid 列表。
-async function resolveNicknames(uids = []) {
-  const wanted = new Set(uids.map(u => String(u).trim()).filter(Boolean));
-  // 解析会大量操作模拟器界面,若此时有任务在跑会互相打架
-  const anyRunning = Object.values(tasks).some(t => t.running);
-  if (anyRunning) {
-    return { ok: false, reason: 'BUSY: 有任务正在运行,请先停止所有任务再解析昵称' };
-  }
-  try {
-    const drv = await ensureDriver();
-    if (!drv) return { ok: false, reason: 'DEMO_MODE: 演示模式下无法解析昵称(请先连接模拟器)' };
-
-    log('system', 'info', `开始解析昵称,需要匹配 ${wanted.size} 个 ID...`);
-    const { pairs, map } = await drv.harvestConversationUids({
-      onLog: (level, msg) => log('system', level, msg),
-    });
-
-    const matched = pairs.filter(p => wanted.has(String(p.uid)));
-    const unmatched = [...wanted].filter(u => !map[u]);
-    log('system', 'ok', `解析完成:共读到 ${pairs.length} 个用户,命中 ${matched.length} 个`);
-
-    return {
-      ok: true,
-      pairs,                       // 全部读到的 {uid, nickname}
-      matched,                     // 命中用户 uid 列表的部分
-      unmatched,                   // 未匹配到的 uid
-      map,                         // { uid: nickname }
+  function launch(name, config, initialize, execute) {
+    // Hold the device lease through initialization, execution, and cancellation cleanup.
+    const runId = randomUUID(), lease = session.acquire({ owner: name, runId });
+    if (!lease.ok)
+      return Promise.resolve(lease);
+    const t = {
+      name, runId, mode: config.executionMode === 'demo' ? 'demo' : 'android', controller: new AbortController(), state: 'starting', running: true, stats: emptyStats(), loop: null, ready: null
     };
-  } catch (e) {
-    log('system', 'fail', `解析昵称失败: ${e.message}`);
-    return { ok: false, reason: e.message };
+    tasks.set(name, t);
+    emitStatus();
+    t.ready = (async () => {
+      try {
+        const context = await initialize(t);
+        cancelled(t.controller.signal);
+        t.state = 'running';
+        emitStatus();
+        t.loop = (async () => {
+          await Promise.resolve();
+          let failure;
+          try {
+            t.result = await execute(t, context);
+          }
+          catch (e) {
+            failure = e;
+            if (e.name !== 'AbortError')
+              log(name, 'fail', e.message);
+          }
+          finally {
+            finish(t, failure);
+          }
+        })();
+        return { ok: true, runId, mode: t.mode };
+      }
+      catch (e) {
+        if (t.cleanup)
+          await t.cleanup().catch(cleanupError => log(name, 'fail', cleanupError.message));
+        finish(t, e);
+        return { ok: false, reason: e.name === 'AbortError' ? 'CANCELLED' : e.message };
+      }
+    })();
+    return t.ready;
   }
-}
-
-// ===== 房间实时数据采集 =====
-// 进入房间 → 周期读控件树 → 抽取在线用户 → 写入 data-store(替换演示数据)
-async function startCollect({ intervalMs, roomName } = {}) {
-  if (collector && collector.getStatus().running) {
-    return { ok: false, reason: 'ALREADY_RUNNING' };
+  async function recordPrivate(t, result) {
+    // Real counts derive from the durable journal; demo results remain separate.
+    const [, { normalizeResult, countResult }] = await modules;
+    const r = normalizeResult(result, { runId: t.runId, mode: t.mode, targetUid: result.targetUid, machineCode: dataStore.getMachineCode(), task: 'private' });
+    if (t.mode === 'android')
+      dataStore.recordOutcome(r);
+    countResult(t.stats, r);
+    log('private', r.outcome === 'confirmed_ui' ? 'ok' : r.outcome === 'failed' ? 'fail' : 'warn', `${r.targetUid}: ${r.outcome}${r.reason ? ` (${r.reason})` : ''}`);
+    emitStatus();
+    return r;
   }
-  // 私聊任务会占用界面(反复进会话),与采集器互斥
-  if (tasks.private.running) {
-    return { ok: false, reason: 'BUSY: 私聊任务运行中,请先停止再开启采集' };
-  }
-  try {
-    const drv = await ensureDriver();
-    if (!drv) return { ok: false, reason: 'DEMO_MODE: 演示模式下无法采集真实房间数据(请先连接模拟器)' };
-
-    const { RoomCollector } = await import(modulePath('room-collector.mjs'));
-    collector = new RoomCollector(drv, {
-      intervalMs: Number(intervalMs) || appConfig.dataFeed.sampleIntervalMs,
-      roomName: roomName || null,
-      onLog: (level, msg) => log('collect', level, msg),
-      onUsers: (users, meta) => {
-        const r = dataStore.ingestRealRecords(users, meta);
-        if (r.added || r.updated) {
-          log('collect', 'ok', `入库: 新增 ${r.added} / 更新 ${r.updated}(当前 ${r.total})`);
+  function startPrivate(config) {
+    return launch('private', config, async (t) => {
+      const [{ validatePrivateConfig }] = await modules, checked = validatePrivateConfig(config);
+      if (!checked.ok)
+        throw Error(checked.reason);
+      if (checked.duplicates.length)
+        log('private', 'skip', `去除 ${checked.duplicates.length} 个重复目标`);
+      if (t.mode === 'android')
+        await readyDriver(t);
+      return checked.config;
+    }, async (t, cfg) => {
+      const signal = t.controller.signal, black = new Set((cfg.blacklist || []).map(String)), machine = dataStore.getMachineCode();
+      let failures = 0;
+      log('private', 'info', `本次共 ${cfg.targets.length} 个目标，用户间隔 ${cfg.delayMin}–${cfg.delayMax} 秒`);
+      for (let i = 0; i < cfg.targets.length; i++) {
+        cancelled(signal);
+        const target = cfg.targets[i];
+        if (black.has(target.uid) || (t.mode === 'android' && (dataStore.isPending(machine, target.uid) || (cfg.noDuplicate !== false && dataStore.isSentToday(machine, target.uid))))) {
+          t.stats.skipped++;
+          log('private', 'skip', `${target.uid}: 黑名单、今日已处理或存在待确认结果`);
+          emitStatus();
+          continue;
         }
-      },
-      onRoom: (room) => { try { dataStore.reportCollectRoom(room); } catch { /* 忽略 */ } },
-      onError: (msg) => { try { dataStore.reportCollectError(msg); } catch { /* 忽略 */ } },
+        let result, intent = false;
+        if (t.mode === 'demo')
+          result = { outcome: 'simulated', stage: 'simulate' };
+        else
+          try {
+            result = await t.driver.sendPrivateMessage(target.nickname, cfg.contents[cfg.mode === 'select' ? cfg.selectedIndex : Math.floor(Math.random() * cfg.contents.length)], {
+              expectedUid: target.uid, signal, onLog: (l, m) => log('private', l, m),
+              onBeforeSend: async () => {
+                // Save intent before clicking send so a process crash cannot trigger a retry.
+                cancelled(signal);
+                dataStore.recordOutcome({
+                  mode: 'android', outcome: 'unconfirmed', stage: 'dispatch', reason: 'DISPATCH_INTENT', runId: t.runId, targetUid: target.uid, machineCode: machine, task: 'private'
+                });
+                intent = true;
+              },
+            });
+          }
+          catch (e) {
+            result = { outcome: intent ? 'unconfirmed' : e.name === 'AbortError' ? 'cancelled' : 'failed', stage: intent ? 'dispatch' : 'prepare', reason: e.message };
+          }
+        if (intent && result?.outcome !== 'confirmed_ui' && (signal.aborted || !isDefinitiveSendRejection(result, target.uid)))
+          result = { ...result, outcome: 'unconfirmed', reason: result?.reason || 'DISPATCH_NOT_CONFIRMED' };
+        const r = await recordPrivate(t, { ...result, targetUid: target.uid });
+        failures = r.outcome === 'failed' && !isDefinitiveSendRejection(r, target.uid) ? failures + 1 : 0;
+        if (signal.aborted || ['unconfirmed', 'cancelled'].includes(r.outcome) || failures >= 5 || (cfg.sendLimit > 0 && t.stats.ok + t.stats.simulated >= cfg.sendLimit)) {
+          if (r.outcome === 'unconfirmed')
+            log('private', 'warn', `本条发送结果不确定，保留待确认并停止；尚余 ${cfg.targets.length - i - 1} 个目标，核对后可继续`);
+          else if (failures >= 5)
+            log('private', 'warn', '连续 5 次导航或准备失败，停止本轮，请检查当前界面');
+          else if (!signal.aborted && cfg.sendLimit > 0)
+            log('private', 'info', `已达到本轮发送上限 ${cfg.sendLimit}`);
+          break;
+        }
+        if (i < cfg.targets.length - 1)
+          await sleep(t.mode === 'demo' ? 0 : (cfg.delayMin + Math.random() * (cfg.delayMax - cfg.delayMin)) * 1000, signal);
+      }
+      return { ...t.stats };
     });
-    dataStore.setSource('room');
-    const r = await collector.start({ intervalMs: Number(intervalMs) || undefined });
-    log('collect', 'ok', `房间实时采集已启动(每 ${(intervalMs || appConfig.dataFeed.sampleIntervalMs) / 1000}s 一轮)`);
-    return { ok: true, ...r };
-  } catch (e) {
-    log('collect', 'fail', `启动采集失败: ${e.message}`);
-    return { ok: false, reason: e.message };
   }
-}
-
-async function stopCollect() {
-  if (collector) {
-    const r = await collector.stop();
-    log('collect', 'info', `房间实时采集已停止(共 ${r.rounds} 轮)`);
-    return { ok: true, ...r };
+  function startCall(config) {
+    return launch('call', config, async (t) => {
+      const [{ validateCallConfig }] = await modules, checked = validateCallConfig(config);
+      if (!checked.ok)
+        throw Error(checked.reason);
+      if (t.mode === 'android')
+        await readyDriver(t);
+      return checked.config;
+    }, async (t, cfg) => {
+      while (!t.controller.signal.aborted) {
+        const ok = t.mode === 'demo' ? true : await t.driver._sendCallOnce(cfg.emoji);
+        if (t.mode === 'demo')
+          t.stats.simulated++;
+        else if (ok) {
+          t.stats.sent++;
+          t.stats.unconfirmed++;
+        }
+        else
+          t.stats.fail++;
+        log('call', ok ? 'info' : 'fail', t.mode === 'demo' ? '模拟打call（未操作设备）' : ok ? '已执行打call动作（未核验送达）' : '未找到可用表情入口');
+        emitStatus();
+        await sleep((cfg.delayMin + Math.random() * (cfg.delayMax - cfg.delayMin)) * 1000, t.controller.signal);
+      }
+    });
   }
-  return { ok: true, rounds: 0 };
+  function startWelcome(config) {
+    return launch('welcome', config, async (t) => {
+      if (t.mode === 'android')
+        await readyDriver(t);
+    }, async (t) => {
+      if (t.mode === 'demo') {
+        while (!t.controller.signal.aborted) {
+          t.stats.simulated++;
+          log('welcome', 'info', '模拟欢迎（未操作设备）');
+          emitStatus();
+          await sleep(3500, t.controller.signal);
+        }
+        return;
+      }
+      const handle = await t.driver.startAutoWelcome({ signal: t.controller.signal, intervalMs: appConfig.taskRunner.welcomePollIntervalMs, onEvent: ev => {
+          if (t.controller.signal.aborted)
+            return;
+          if (ev.ok) {
+            t.stats.clicked++;
+            t.stats.unconfirmed++;
+          }
+          else
+            t.stats.skipped++;
+          log('welcome', ev.ok ? 'info' : 'skip', `${ev.key}: ${ev.ok ? '欢迎动作已执行（未核验送达）' : '未找到欢迎入口'}`);
+          emitStatus();
+        } });
+      try {
+        await untilAbort(t.controller.signal);
+      }
+      finally {
+        await handle.stop();
+      }
+    });
+  }
+  function start(name, config = {}) {
+    if (!config || typeof config !== 'object' || Array.isArray(config))
+      return Promise.resolve({ ok: false, reason: 'INVALID_CONFIG' });
+    if (config.executionMode != null && !['android', 'demo'].includes(config.executionMode))
+      return Promise.resolve({ ok: false, reason: 'INVALID_EXECUTION_MODE' });
+    if (name === 'private')
+      return startPrivate(config);
+    if (name === 'call')
+      return startCall(config);
+    if (name === 'welcome')
+      return startWelcome(config);
+    return Promise.resolve({ ok: false, reason: 'UNKNOWN_TASK' });
+  }
+  async function stop(name) {
+    // Request cancellation, then keep ownership until all work has settled.
+    const t = tasks.get(name);
+    if (!t?.running)
+      return { ok: true, state: t?.state || 'stopped' };
+    t.state = 'stopping';
+    t.controller.abort();
+    emitStatus();
+    await t.ready;
+    if (t.loop)
+      await t.loop;
+    return { ok: true, state: t.state };
+  }
+  async function stopAll() {
+    await Promise.all([...tasks.keys()].map(stop));
+  }
+  async function waitForIdle() {
+    for (const t of tasks.values()) {
+      if (t.ready)
+        await t.ready;
+      if (t.loop)
+        await t.loop;
+    }
+  }
+  function startCollect(opts = {}) {
+    return launch('collect', { executionMode: 'android' }, async (t) => {
+      if (dataStore.getConfig?.('settings')?.executionMode === 'demo')
+        throw Error('REAL_MODE_REQUIRED: 演示模式不执行真实房间采集');
+      const scope = opts.scope ?? 'multi';
+      if (!['single', 'multi'].includes(scope))
+        throw Error('INVALID_COLLECT_SCOPE');
+      const maxRooms = opts.maxRooms ?? 12, maxPages = opts.maxPages ?? 6, maxProfiles = opts.maxProfiles ?? 6;
+      if (!Number.isInteger(maxRooms) || maxRooms < 1 || maxRooms > 30 || !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 12 || !Number.isInteger(maxProfiles) || maxProfiles < 0 || maxProfiles > 12)
+        throw Error('INVALID_COLLECT_LIMIT');
+      const intervalMs = opts.intervalMs ?? (scope === 'multi' ? 1500 : 5000);
+      if (!Number.isFinite(intervalMs) || intervalMs < 1000 || intervalMs > 60000)
+        throw Error('INVALID_COLLECT_INTERVAL');
+      const drv = await readyDriver(t);
+      collector = await createCollector(drv, {
+        intervalMs, scope, maxRooms, maxPages, maxProfiles, roomName: opts.roomName || null, signal: t.controller.signal,
+        ...(dataStore.getCollectionCoverage?.() || {}),
+        onProgress: () => {
+          if (!t.controller.signal.aborted)
+            emitStatus();
+        },
+        onLog: (l, m) => log('collect', l, m), onUsers: (users, meta) => {
+          if (!t.controller.signal.aborted) {
+            return dataStore.ingestRealRecords(users, meta);
+          }
+        },
+        onRoom: room => {
+          if (!t.controller.signal.aborted)
+            dataStore.reportCollectRoom?.(room);
+        }, onError: msg => {
+          if (!t.controller.signal.aborted)
+            dataStore.reportCollectError?.(msg);
+        },
+      });
+      const currentCollector = collector;
+      collectorRunId = t.runId;
+      t.cleanup = () => currentCollector.stop();
+      cancelled(t.controller.signal);
+      dataStore.setSource('room');
+      await currentCollector.start({ intervalMs, signal: t.controller.signal });
+      return currentCollector;
+    }, async (t, c) => {
+      try {
+        await untilAbort(t.controller.signal);
+      }
+      finally {
+        await c.stop();
+      }
+    });
+  }
+  function stopCollect() {
+    return stop('collect');
+  }
+  function getCollectStatus() {
+    const t = tasks.get('collect');
+    return { ok: true, ...(collector && collectorRunId === t.runId ? collector.getStatus() : { rounds: 0 }), running: t.running, state: t.state, statusRevision, source: dataStore.getStatus().source };
+  }
+  async function resolveNicknames(uids = []) {
+    let run;
+    const response = await launch('resolve', { executionMode: 'android' }, async (t) => {
+      const wantedUids = [...new Set(uids.map(String).filter(u => /^\d+$/.test(u)))];
+      if (!wantedUids.length)
+        throw Error('NO_TARGETS');
+      await readyDriver(t);
+      run = t;
+      return wantedUids;
+    }, async (t, wantedUids) => {
+      const r = await t.driver.harvestConversationUids({ wantedUids, signal: t.controller.signal, onLog: (l, m) => log('resolve', l, m) });
+      return { ok: true, ...r, matched: r.pairs.filter(p => wantedUids.includes(String(p.uid))), unmatched: wantedUids.filter(u => !r.map[u]) };
+    });
+    if (!response.ok)
+      return response;
+    await run.loop;
+    return run.result || { ok: false, reason: run.error || 'CANCELLED' };
+  }
+  async function withDeviceOperation(name, action) {
+    let run;
+    const response = await launch(name, { executionMode: 'android' }, async (t) => {
+      run = t;
+      return t.controller.signal;
+    }, async (t, signal) => action(signal));
+    if (!response.ok)
+      return response;
+    await run.loop;
+    if (run.error)
+      return { ok: false, reason: run.error };
+    return run.result || { ok: false, reason: 'CANCELLED' };
+  }
+  async function refreshDriver() {
+    return { ok: true, ...getStatus() };
+  }
+  return {
+    start, stop, stopAll, waitForIdle, getStatus, startCollect, stopCollect, getCollectStatus, resolveNicknames, withDeviceOperation, refreshDriver, setLogCallback: fn => {
+      logCallback = fn;
+    }, setStatusCallback: fn => {
+      statusCallback = fn;
+    }
+  };
 }
-
-function getCollectStatus() {
-  const base = collector ? collector.getStatus() : { running: false, rounds: 0 };
-  return { ok: true, ...base, source: dataStore.getStatus().source };
-}
-
-module.exports = { start, stop, stopAll, getStatus, setLogCallback, setStatusCallback, refreshDriver, resolveNicknames, startCollect, stopCollect, getCollectStatus };
+module.exports = { ...createTaskRunner(), createTaskRunner };

@@ -1,0 +1,13 @@
+* text=auto
+*.bat text eol=crlf
+*.sh text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.java text eol=lf
+*.xml text eol=lf
+*.apk -text
+*.png -text

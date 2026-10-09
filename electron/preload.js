@@ -32,7 +32,7 @@ contextBridge.exposeInMainWorld('api', {
     // 获取统计卡片数据 → { ok, data:{ femaleCount, maleCount, todayTotal, updatedAt } }
     getStats: (date) => ipcRenderer.invoke('portal:getStats', date),
     // 获取采集记录(分页) → { ok, records, page, pages, total }
-    getRecords: (date, sex, page, size) => ipcRenderer.invoke('portal:getRecords', date, sex, page, size),
+    getRecords: (date, sex, page, size, keyword) => ipcRenderer.invoke('portal:getRecords', date, sex, page, size, keyword),
     // 获取整点汇总(按小时聚合的 ID 列表) → { ok, hourly:[...] }
     getSummary: (date) => ipcRenderer.invoke('portal:getSummary', date),
     // 连接状态 → { connected, source, realCount, lastCollectAt, lastCollectRoom, collectError, ... }
@@ -64,6 +64,8 @@ contextBridge.exposeInMainWorld('api', {
     stop: (name) => ipcRenderer.invoke('task:stop', name),
     // 查询所有任务状态 → { private:{running,stats}, welcome:..., call:... }
     getStatus: () => ipcRenderer.invoke('task:status'),
+    getPending: () => ipcRenderer.invoke('task:pending'),
+    resolvePending: (request) => ipcRenderer.invoke('task:resolvePending', request),
     // 把纯 uid 列表解析为 {uid, nickname}(真实模式必需)
     // → { ok, pairs:[{uid,nickname}], matched:[...], unmatched:[...], map:{uid:nickname} }
     resolveNicknames: (uids) => ipcRenderer.invoke('task:resolveNicknames', uids),

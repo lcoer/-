@@ -20,7 +20,7 @@ const GuestView = (function () {
     const cls = r.sex === 'female' ? 'female' : (r.sex === 'male' ? 'male' : 'unknown');
     const sexLabel = r.sex === 'female' ? '女神' : (r.sex === 'male' ? '男神' : '未知');
     const realTag = r.source === 'room'
-      ? `<span class="guest-tag real" title="来自模拟器实时采集">实时</span>` : '';
+      ? `<span class="guest-tag real" title="页面可见用户线索，不代表完整在线名单">最近观察</span>` : '';
     // uidReal=false 表示还没拿到真实用户ID(只有昵称)
     const uidText = r.uidReal === false ? '未获取(仅昵称)' : escapeHtml(r.uid);
     const uidCls = r.uidReal === false ? 'guest-row-value muted' : 'guest-row-value';
@@ -70,7 +70,7 @@ const GuestView = (function () {
   }
 
   async function load() {
-    const res = await api.portal.getRecords(state.date, state.seg, state.page, 24);
+    const res = await api.portal.getRecords(state.date, state.seg, state.page, 24, state.kw);
     if (!res || !res.ok) return;
     state.records = res.records || [];
     state.pages = res.pages || 1;
@@ -88,6 +88,11 @@ const GuestView = (function () {
   }
 
   async function init() {
+    const preferences = await api.config.get('collection') || { scope: 'multi', maxRooms: 12, maxPages: 6 };
+    document.getElementById('collectScope').value = preferences.scope || 'multi';
+    document.getElementById('collectMaxRooms').value = preferences.maxRooms || 12;
+    document.getElementById('collectMaxPages').value = preferences.maxPages || 6;
+    document.getElementById('collectMaxProfiles').value = preferences.maxProfiles ?? 6;
     const dates = await api.portal.getDates();
     if (dates && dates.dates && dates.dates.length) {
       state.date = dates.today || dates.dates[0];
@@ -108,7 +113,7 @@ const GuestView = (function () {
       load();
     });
 
-    kwInput.addEventListener('input', debounce(() => { state.kw = kwInput.value.trim(); render(); }, 250));
+    kwInput.addEventListener('input', debounce(() => { state.kw = kwInput.value.trim(); state.page = 1; load(); }, 250));
 
     prevBtn.addEventListener('click', () => { if (state.page > 1) { state.page--; load(); } });
     nextBtn.addEventListener('click', () => { if (state.page < state.pages) { state.page++; load(); } });
@@ -126,6 +131,8 @@ const GuestView = (function () {
       document.getElementById('statTodayTotal').textContent = fmtNum(d.todayTotal);
       document.getElementById('statUpdatedAt').textContent = d.updatedAt || '--:--';
       document.getElementById('lastSyncTime').textContent = d.updatedAt || '--:--';
+      document.getElementById('collectStoredVerified').textContent = fmtNum(d.verifiedCount);
+      document.getElementById('collectStoredHints').textContent = fmtNum(d.placeholderCount);
     } catch (e) {
       console.warn('[guest-view] updateStats 失败', e);
     }
@@ -135,9 +142,9 @@ const GuestView = (function () {
     if (ev.type === 'record') newRecordCard(ev.payload);
     if (ev.type === 'batch') {
       // 真实采集批量入库 → 整页刷新
-      load().then(updateStats);
+      if (ev.payload.added || ev.payload.updated) load();
     }
-    if (ev.type === 'stats') updateStats();
+    if (ev.type === 'stats') refreshStats();
     if (ev.type === 'cleared') { load().then(updateStats); }
     if (ev.type === 'source') { state.source = ev.payload.source; updateLiveBadge(); }
     if (ev.type === 'collect-status') updateLiveBadge(ev.payload);
@@ -149,56 +156,111 @@ const GuestView = (function () {
   const clearBtn = document.getElementById('guestClearBtn');
   const liveBox = document.getElementById('portalLiveBox');
   const liveText = document.getElementById('portalLiveText');
+  const refreshStats = debounce(updateStats, 100);
+  let latestCollectStatus = { running: false, state: 'stopped' };
+  let deviceOwner = null, statusRevision = 0;
+  let backendStatusRevision = -1;
+  let startRequestPending = false, stopRequestPending = false;
+
+  function acceptBackendRevision(revision) {
+    if (!Number.isInteger(revision) || revision < 0) return true;
+    if (revision < backendStatusRevision) return false;
+    backendStatusRevision = revision;
+    return true;
+  }
+
+  function renderCollectControls() {
+    const stopping = latestCollectStatus.state === 'stopping' || stopRequestPending;
+    collectBtn.classList.toggle('active', state.collecting);
+    collectBtnText.textContent = stopping ? '停止中...' : state.collecting ? '停止采集' : startRequestPending ? '启动中...' : '开始实时采集';
+    // A start request may still be awaiting its reply after the task is already
+    // starting. Allow stopping then, but preserve cancellation/device ownership.
+    collectBtn.disabled = stopping || (!!deviceOwner && deviceOwner.owner !== 'collect') || (startRequestPending && !state.collecting);
+    for (const id of ['collectScope', 'collectMaxRooms', 'collectMaxPages', 'collectMaxProfiles']) document.getElementById(id).disabled = state.collecting || startRequestPending || stopRequestPending;
+  }
+
+  function applyCollectStatus(st, busy) {
+    latestCollectStatus = st;
+    deviceOwner = busy;
+    state.collecting = !!st.running;
+    state.source = st.source || state.source;
+    renderCollectControls();
+    document.getElementById('collectNewVerified').textContent = fmtNum(st.newVerified);
+    document.getElementById('collectRooms').textContent = fmtNum(st.roomsVisited);
+    document.getElementById('collectPages').textContent = fmtNum(st.pagesScanned);
+    document.getElementById('collectProfiles').textContent = fmtNum(st.profilesRead);
+    document.getElementById('collectDuplicates').textContent = fmtNum(st.duplicateSightings);
+    const coverage = { empty: '成员名单显示暂无数据，已降级为公屏与麦位；多房间模式会继续下一房间。', unavailable: '未找到可用成员列表，读取公屏与麦位线索。', partial: '成员列表只完成部分扫描，保留已读数据并继续遍历。', complete: '本房间成员列表已扫描；真实 UID 与仅昵称记录分别统计。' };
+    if (st.memberStatus) document.getElementById('collectCoverageHint').textContent = coverage[st.memberStatus] || '正在扫描公开可见用户；本次新 UID 已排除历史已采集 ID。';
+    if (st.waitingForNextCycle) document.getElementById('collectCoverageHint').textContent = st.navigationStatus === 'retry' ? '暂未确认更多可访问房间，正在等待重试。' : '已达到本轮访问范围，正在等待下一轮。';
+    if (!state.collecting) document.getElementById('collectCoverageHint').textContent = st.state === 'failed' ? `采集失败：${st.error || '请查看控制台日志'}` : '采集已停止，已采集记录已保留。';
+    updateLiveBadge({ room: st.room });
+  }
+
+  function onTaskStatus(status) {
+    if (!acceptBackendRevision(status.statusRevision)) return;
+    statusRevision++;
+    const collect = status.collect;
+    if (collect) applyCollectStatus({ ...collect.stats, running: collect.running, state: collect.state, error: collect.error }, status.deviceOwner);
+  }
 
   function updateLiveBadge(extra) {
     const real = state.source === 'room';
     if (liveBox) liveBox.classList.toggle('is-real', real);
-    let txt = real ? '真实采集' : '演示数据';
-    if (real && extra && extra.room) txt = `采集中 · ${extra.room}`;
+    let txt = real ? (state.collecting ? '采集中' : '房间记录 · 采集未运行') : '演示数据';
+    if (real && state.collecting && extra && extra.room) txt = `采集中 · ${extra.room}`;
     if (real && extra && extra.error) txt = '采集异常(见日志)';
     if (liveText) liveText.textContent = txt;
+    const statusText = document.getElementById('portalLiveState');
+    if (statusText) statusText.textContent = txt;
   }
 
   async function refreshCollectStatus() {
+    const revision = statusRevision;
     try {
-      const st = await api.collect.status();
+      const [st, tasks] = await Promise.all([api.collect.status(), api.task.getStatus()]);
       if (!st || !st.ok) return;
-      state.collecting = !!st.running;
-      state.source = st.source || state.source;
-      collectBtn.classList.toggle('active', state.collecting);
-      collectBtnText.textContent = state.collecting ? '停止采集' : '开始实时采集';
-      updateLiveBadge({ room: st.room });
+      const backendRevision = tasks.statusRevision ?? st.statusRevision;
+      const versioned = Number.isInteger(backendRevision) && backendRevision >= 0;
+      if (versioned ? !acceptBackendRevision(backendRevision) : revision !== statusRevision) return;
+      // The task owns running/stopping state; collector metrics may reflect an
+      // earlier snapshot while cancellation is settling.
+      const collect = tasks.collect;
+      applyCollectStatus(collect ? { ...st, ...collect.stats, running: collect.running, state: collect.state, error: collect.error } : st, tasks.deviceOwner);
     } catch (e) { /* 忽略 */ }
   }
 
   async function toggleCollect() {
-    collectBtn.disabled = true;
+    if (stopRequestPending || latestCollectStatus.state === 'stopping' || (startRequestPending && !state.collecting) || (deviceOwner && deviceOwner.owner !== 'collect')) return;
+    const stopping = state.collecting;
+    if (stopping) stopRequestPending = true;
+    else startRequestPending = true;
+    renderCollectControls();
     try {
-      if (state.collecting) {
+      if (stopping) {
         const r = await api.collect.stop();
-        if (r && r.ok) {
-          state.collecting = false;
-          collectBtn.classList.remove('active');
-          collectBtnText.textContent = '开始实时采集';
-          updateLiveBadge();
-        }
+        if (!r?.ok) toast(r?.reason || '停止采集失败', 'error');
       } else {
         // 开启采集:自动进房 + 自动清除虚拟数据
-        collectBtnText.textContent = '启动中...';
-        const r = await api.collect.start({ intervalMs: 5000 });
+        const preferences = { scope: document.getElementById('collectScope').value, maxRooms: Number(document.getElementById('collectMaxRooms').value), maxPages: Number(document.getElementById('collectMaxPages').value), maxProfiles: Number(document.getElementById('collectMaxProfiles').value) };
+        const saved = await api.config.set('collection', preferences);
+        if (!saved?.ok) { toast(saved?.reason || '参数保存失败', 'error'); return; }
+        const r = await api.collect.start({ ...preferences, intervalMs: preferences.scope === 'multi' ? 1500 : 5000 });
         if (r && r.ok) {
-          state.collecting = true;
           state.source = 'room';
-          collectBtn.classList.add('active');
-          collectBtnText.textContent = '停止采集';
-          load().then(updateStats);
+          await load();
+          await updateStats();
         } else {
-          collectBtnText.textContent = '开始实时采集';
-          alert((r && r.reason) || '启动采集失败');
+          toast((r && r.reason) || '启动采集失败', 'error');
         }
       }
+    } catch (e) {
+      toast(`${stopping ? '停止' : '启动'}采集失败: ${e.message}`, 'error');
     } finally {
-      collectBtn.disabled = false;
+      if (stopping) stopRequestPending = false;
+      else startRequestPending = false;
+      await refreshCollectStatus();
+      renderCollectControls();
     }
   }
 
@@ -220,5 +282,5 @@ const GuestView = (function () {
   if (collectBtn) collectBtn.addEventListener('click', toggleCollect);
   if (clearBtn) clearBtn.addEventListener('click', clearDemoData);
 
-  return { init, updateStats, onStream, refreshCollectStatus };
+  return { init, updateStats, onStream, refreshCollectStatus, onTaskStatus };
 })();

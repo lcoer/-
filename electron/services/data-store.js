@@ -5,12 +5,13 @@
 //   3. 发送统计与当日去重持久化
 //
 // 说明:参考软件的正式版本通过独立后端(HTTP+MQTT)下发采集数据;
-//       本实现将数据源抽离为可替换模块,默认内置"演示数据生成器",
-//       接入真实数据源时只需替换 _generateSample 与 getRecords 的实现。
+//       默认使用真实采集模式;演示流必须显式开启。
 
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('node:crypto');
 const appConfig = require('../config');
+const {isDefinitiveSendRejection} = require('../../src/send-proof.cjs');
 
 let _app = null;
 try { _app = require('electron').app; } catch { _app = null; }
@@ -20,12 +21,14 @@ function userDataDir() {
   return path.join(process.cwd(), '.data');
 }
 
+function createDataStore({ dataDir, clock = () => Date.now(), persist = true } = {}) {
+const nowMs = () => { const value = clock(); return value instanceof Date ? value.getTime() : value; };
 const STATE = {
   configFile: null,
   statsFile: null,
   sentFile: null,
   sourceFile: null,
-  sourcePref: { source: 'demo' },  // 持久化的数据源偏好
+  sourcePref: { source: 'room' },  // 持久化的数据源偏好
   config: {},
   stats: {},
   sentToday: {},          // { 'YYYY-MM-DD': { machineCode: [uid...] } }
@@ -35,7 +38,7 @@ const STATE = {
   lastEventAt: null,
   timer: null,
   // 数据源:demonstration 生成器 or 真实房间采集
-  source: 'demo',         // 'demo' | 'room'
+  source: 'room',         // 'demo' | 'room'
   lastCollectAt: null,    // 最近一次真实采集时间
   lastCollectRoom: null,  // 最近一次真实采集所在房间
   collectError: null,     // 最近一次真实采集错误
@@ -48,47 +51,88 @@ const GUILDS = ['', '', '', '星海公会', '拾光社', '鲸落联盟'];
 
 function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function pick(arr) { return arr[randInt(0, arr.length - 1)]; }
-function dateStr(d = new Date()) {
+function dateStr(d = new Date(nowMs())) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function epoch(value, fallback) {
+  if (value == null || value === '') return fallback;
+  const parsed = typeof value === 'number' ? value : (/^\d+$/.test(String(value)) ? Number(value) : Date.parse(value));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 // ===== 初始化 =====
 function init() {
-  if (!_app) return;
-  STATE.configFile = path.join(userDataDir(), 'config.json');
-  STATE.statsFile = path.join(userDataDir(), 'stats.json');
-  STATE.sentFile = path.join(userDataDir(), 'sent.json');
-  STATE.sourceFile = path.join(userDataDir(), 'source.json');
-  loadJson(STATE.configFile, STATE.config, defaultConfig());
-  loadJson(STATE.statsFile, STATE.stats, {});
-  loadJson(STATE.sentFile, STATE.sentToday, {});
-  loadJson(STATE.sourceFile, STATE.sourcePref, { source: 'demo' });
-
-  // 真实采集模式下:不生成任何演示数据,保持面板干净(只等真实采集写入)
-  if (STATE.sourcePref.source === 'room') {
-    STATE.source = 'room';
-    STATE.records = [];
-  } else {
-    buildDemoRecords();
-    startDemoStream();
+  shutdown();
+  const dir = dataDir || userDataDir();
+  STATE.configFile = path.join(dir, 'config.json');
+  STATE.statsFile = path.join(dir, 'stats-v2.json');
+  STATE.sentFile = path.join(dir, 'sent-v2.json');
+  STATE.sourceFile = path.join(dir, 'source.json');
+  STATE.recordsFile = path.join(dir, 'records-v2.json');
+  STATE.outcomesFile = path.join(dir, 'outcomes-v2.json');
+  STATE.config = defaultConfig(); STATE.stats = {}; STATE.sentToday = {}; STATE.records = []; STATE.outcomes = []; STATE.legacyStats = {}; STATE.recoveryRequired = false;
+  if (persist) {
+    loadJson(STATE.configFile, STATE.config, defaultConfig());
+    STATE.config.settings = { executionMode: 'android', ...STATE.config.settings };
+    loadJson(STATE.statsFile, STATE.stats, {});
+    loadJson(STATE.sentFile, STATE.sentToday, {});
+    loadJson(path.join(dir, 'stats.json'), STATE.legacyStats, {});
+    loadJson(STATE.sourceFile, STATE.sourcePref, { source: 'room' });
+    const history = {}; loadJson(STATE.recordsFile, history, {});
+    if (history.schemaVersion === 2 && Array.isArray(history.records)) STATE.records = history.records.map(r => ({...r, lastSeenAt:epoch(r.lastSeenAt,epoch(r.ts,nowMs()))}));
+    const results = {}; loadJson(STATE.outcomesFile, results, {}, true);
+    if (Object.keys(results).length && (results.schemaVersion !== 2 || !Array.isArray(results.results))) throw Error('DATA_CORRUPT: Invalid outcome journal schema');
+    if (results.results?.some(r => !r || typeof r !== 'object' || !Number.isFinite(r.at) || typeof r.targetUid !== 'string' || !['android','demo'].includes(r.mode) || !['confirmed_ui','failed','unconfirmed','cancelled','skipped','simulated'].includes(r.outcome))) throw Error('DATA_CORRUPT: Invalid outcome journal entry');
+    if (results.schemaVersion === 2 && Array.isArray(results.results)) STATE.outcomes = results.results;
   }
+  // Legacy source preferences predate explicit execution mode and cannot opt in.
+  STATE.source = STATE.config.settings?.executionMode === 'demo' ? 'demo' : 'room';
+  if (STATE.source === 'demo') startDemoStream();
 }
+function shutdown() { if (STATE.timer) clearInterval(STATE.timer); STATE.timer = null; }
+function saveRecords(records = STATE.records) { saveJson(STATE.recordsFile, { schemaVersion: 2, records: records.filter(r => r.source !== 'demo') }); }
 
-function loadJson(file, target, fallback) {
+function loadJson(file, target, fallback, critical = false) {
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
     Object.assign(target, raw);
-  } catch { Object.assign(target, fallback); }
+  } catch (error) {
+    if (error.code === 'ENOENT' && !fs.existsSync(`${file}.bak`)) { Object.assign(target, fallback); return; }
+    try { Object.assign(target, JSON.parse(fs.readFileSync(`${file}.bak`, 'utf8'))); if (critical) STATE.recoveryRequired = true; }
+    catch {
+      if (critical) throw Error(`DATA_CORRUPT: Cannot read ${path.basename(file)} or its backup`);
+      Object.assign(target, fallback);
+    }
+  }
 }
-function saveJson(file, obj) {
+function saveJson(file, obj, backup = true) {
+  if (!persist) return;
+  if (!file) throw new Error('Data store must be initialized before saving');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (backup && fs.existsSync(file) && fs.statSync(file).isFile()) {
+    // Never replace a valid backup with a corrupt primary file.
+    let previous;
+    try { previous = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    if (previous) saveJson(`${file}.bak`, previous, false);
+  }
+  const temp = `${file}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(obj, null, 2), 'utf8');
-  } catch { /* 忽略写失败 */ }
+    fs.writeFileSync(temp, JSON.stringify(obj, null, 2), 'utf8');
+    // Windows antivirus/indexing may briefly hold the destination open.
+    for (let attempt = 0; ; attempt++) {
+      try { fs.renameSync(temp, file); break; }
+      catch (error) {
+        if (attempt >= 3 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
+  }
+  finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
 }
 
 function defaultConfig() {
   return {
+    settings: { executionMode: 'android' },
     rules: {
       source: 'cloud',
       cloudDate: dateStr(),
@@ -123,8 +167,9 @@ function getConfig(key) {
   return STATE.config[key];
 }
 function setConfig(key, value) {
-  STATE.config[key] = value;
-  saveJson(STATE.configFile, STATE.config);
+  const next = { ...STATE.config, [key]: value };
+  saveJson(STATE.configFile, next);
+  STATE.config = next;
 }
 function allConfig() { return STATE.config; }
 
@@ -133,7 +178,7 @@ function makeRecord(sex, ts) {
   const isFemale = sex === 'female';
   const uid = String(randInt(10000000, 99999999));
   const rcid = String(randInt(10000000, 99999999));
-  const t = ts || Date.now();
+  const t = ts || nowMs();
   return {
     uid,
     rongCloudId: rcid,
@@ -150,7 +195,7 @@ function makeRecord(sex, ts) {
 }
 
 function buildDemoRecords() {
-  const now = Date.now();
+  const now = nowMs();
   const records = [];
   // 生成近 3 小时的历史记录
   for (let i = 0; i < 60; i++) {
@@ -169,7 +214,7 @@ function startDemoStream() {
     const rec = makeRecord(Math.random() < 0.6 ? 'female' : 'male');
     STATE.records.unshift(rec);
     if (STATE.records.length > 500) STATE.records.pop();
-    STATE.lastEventAt = Date.now();
+    STATE.lastEventAt = nowMs();
     if (STATE.streamCallback) {
       STATE.streamCallback({ type: 'record', payload: rec });
       STATE.streamCallback({ type: 'stats', payload: getStats() });
@@ -185,10 +230,17 @@ function setStreamCallback(fn) { STATE.streamCallback = fn; }
 // @param {object} meta { room, source }
 // 返回 { added, updated, total }
 function ingestRealRecords(list = [], meta = {}) {
-  if (!Array.isArray(list) || !list.length) return { added: 0, updated: 0, total: STATE.records.length };
-  const now = Date.now();
-  const t = meta && meta.ts ? meta.ts : now;
-  let added = 0, updated = 0;
+  if (!Array.isArray(list) || !list.length) return { added: 0, updated: 0, addedVerified:0, addedUnverified:0, unchanged:0, resolvedHints:0, total: STATE.records.length };
+  const now = nowMs();
+  const t = epoch(meta.ts,now);
+  let added = 0, updated = 0, addedVerified = 0, addedUnverified = 0, unchanged = 0, resolvedHints = 0;
+  // Build once per batch; appending keeps indices stable until the final sort.
+  const records = STATE.records.slice();
+  const removed = new Set();
+  const key = r => `${r.source}:${r.uidReal !== false}:${r.uid}:${dateStr(new Date(r.ts))}`;
+  const wanted = new Set(list.filter(Boolean).map(raw => raw.uidReal === false ? String(raw.uid || '').trim() : String(raw.uid || '').replace(/\D/g,'')));
+  const indices = new Map();
+  records.forEach((r,i)=>{ if(wanted.has(r.uid)) indices.set(key(r),i); });
 
   for (const raw of list) {
     if (!raw) continue;
@@ -197,6 +249,8 @@ function ingestRealRecords(list = [], meta = {}) {
     let uid = raw.uid ? String(raw.uid).trim() : '';
     if (isReal) uid = uid.replace(/\D/g, '');
     if (!uid) continue;
+    const observedAt = epoch(raw.lastSeenAt,epoch(raw.ts,t));
+    const ts = epoch(raw.ts,observedAt);
     const rec = {
       uid,
       rongCloudId: raw.rongCloudId ? String(raw.rongCloudId) : null,
@@ -205,58 +259,98 @@ function ingestRealRecords(list = [], meta = {}) {
       sex: raw.sex === 'female' ? 'female' : (raw.sex === 'male' ? 'male' : 'unknown'),
       room: raw.room || meta.room || '',
       guild: raw.guild || '',
-      online: raw.online !== false,
+      online: typeof raw.online === 'boolean' ? raw.online : null,
+      guildKnown: raw.guildKnown === true || !!raw.guild,
+      roomCode: raw.roomCode || meta.roomCode || null,
+      seenFrom: raw.seenFrom || meta.seenFrom || 'unknown',
+      lastSeenAt: observedAt,
       source: 'room',
       // uidReal=false 表示 uid 是"昵称哈希占位",不是真实用户ID(不能用于发送)
       uidReal: isReal,
-      ts: raw.ts || t,
-      time: new Date(raw.ts || t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+      ts,
+      time: new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
     };
-    // 同 uid 覆盖(保留最新信息);否则新增
-    const idx = STATE.records.findIndex(r => r.uid === uid && dateStr(new Date(r.ts)) === dateStr(new Date(rec.ts)));
-    if (idx >= 0) {
-      // 若已有记录是真实 uid,不要被占位 uid 覆盖
-      if (STATE.records[idx].uidReal === false && rec.uidReal === true) {
-        STATE.records.splice(idx, 1);
-        STATE.records.unshift(rec);
-        updated++;
-        continue;
+    // Direct user-card evidence can resolve exactly one scoped observation.
+    // Keep historical days intact and never infer identity from nickname alone.
+    if(raw.uidReal === true && /^\d+$/.test(String(raw.uid)) && raw.source === 'room_observation' && rec.seenFrom === 'roomProfile' && raw.evidence === 'matched_room_user_card' && rec.roomCode && raw.nickname) {
+      const expected = 'n'+createHash('sha256').update(`${rec.roomCode}\0${raw.nickname}`).digest('hex').slice(0,24);
+      if(raw.resolvedFrom === expected) {
+        rec.evidence = raw.evidence;
+        rec.resolvedFrom = raw.resolvedFrom;
+        const hintIdx = records.findIndex((r,i)=>!removed.has(i) && r.source === 'room' && r.uidReal === false && r.uid === expected && r.roomCode === rec.roomCode && r.nickname === raw.nickname && dateStr(new Date(r.ts)) === dateStr(new Date(ts)));
+        if(hintIdx >= 0) {
+          const hint = records[hintIdx];
+          const priorVerified = records[indices.get(key(rec))];
+          if(rec.sex === 'unknown') {
+            if(['female','male'].includes(priorVerified?.sex)) rec.sex = priorVerified.sex;
+            else if(['female','male'].includes(hint.sex)) rec.sex = hint.sex;
+          }
+          if(!rec.guild) {
+            rec.guild = priorVerified?.guild || hint.guild || '';
+            rec.guildKnown = priorVerified?.guildKnown === true || hint.guildKnown === true || !!rec.guild;
+          }
+          removed.add(hintIdx);indices.delete(key(hint));resolvedHints++;
+        }
       }
-      STATE.records[idx] = { ...STATE.records[idx], ...rec, uidReal: STATE.records[idx].uidReal || rec.uidReal };
+    }
+    // 同 uid 覆盖(保留最新信息);否则新增
+    const recordKey = key(rec), idx = indices.get(recordKey);
+    if (idx !== undefined) {
+      const prev = records[idx];
+      if (isReal) {
+        if(rec.sex === 'unknown' && ['female','male'].includes(prev.sex)) rec.sex = prev.sex;
+        if(!rec.guild) { rec.guild = prev.guild || ''; rec.guildKnown = prev.guildKnown === true || !!rec.guild; }
+        if(!rec.rongCloudId) rec.rongCloudId = prev.rongCloudId || null;
+        if(!raw.nickname) rec.nickname = prev.nickname;
+        if(!rec.avatar) rec.avatar = prev.avatar || null;
+        if(!rec.roomCode && rec.room === prev.room) rec.roomCode = prev.roomCode || null;
+      }
+      rec.lastSeenAt = Math.max(rec.lastSeenAt,epoch(prev.lastSeenAt,epoch(prev.ts,0)));
+      const merged = {...prev,...rec};
+      if(Object.keys(merged).every(field=>merged[field] === prev[field])) { unchanged++; continue; }
+      records[idx] = merged;
       updated++;
     } else {
-      STATE.records.unshift(rec);
+      indices.set(recordKey,records.length);
+      records.push(rec);
       added++;
+      if(isReal) addedVerified++; else addedUnverified++;
     }
   }
-  STATE.records.sort((a, b) => b.ts - a.ts);
-  if (STATE.records.length > 800) STATE.records.length = 800;
+  if(added || updated || resolvedHints) {
+    const nextRecords = removed.size ? records.filter((_,i)=>!removed.has(i)) : records;
+    nextRecords.sort((a, b) => b.ts - a.ts);
+    saveRecords(nextRecords);
+    STATE.records = nextRecords;
+  }
+  // Preserve historical observations across dates.
 
   STATE.source = 'room';
   STATE.lastCollectAt = now;
   STATE.lastCollectRoom = (meta && meta.room) || STATE.lastCollectRoom;
   STATE.collectError = null;
   STATE.lastEventAt = now;
+  shutdown();
 
   if (STATE.streamCallback) {
-    STATE.streamCallback({ type: 'batch', payload: { added, updated, source: 'room', room: STATE.lastCollectRoom, at: now } });
+    STATE.streamCallback({ type: 'batch', payload: { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, source: 'room', room: STATE.lastCollectRoom, at: now } });
     STATE.streamCallback({ type: 'stats', payload: getStats() });
   }
-  return { added, updated, total: STATE.records.length };
+  return { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, total: STATE.records.length };
 }
 
 // 采集器报告一次错误(供界面提示)
 function reportCollectError(msg) {
   STATE.collectError = msg ? String(msg) : null;
   if (STATE.streamCallback) {
-    STATE.streamCallback({ type: 'collect-status', payload: { error: STATE.collectError, at: Date.now() } });
+    STATE.streamCallback({ type: 'collect-status', payload: { error: STATE.collectError, at: nowMs() } });
   }
 }
 
 // 采集器报告"正在采集的房间"(即使本轮没抓到用户也刷新)
 function reportCollectRoom(roomName) {
   if (roomName) STATE.lastCollectRoom = roomName;
-  STATE.lastCollectAt = Date.now();
+  STATE.lastCollectAt = nowMs();
   if (STATE.streamCallback) {
     STATE.streamCallback({ type: 'collect-status', payload: { room: STATE.lastCollectRoom, at: STATE.lastCollectAt } });
   }
@@ -274,6 +368,7 @@ function clearDemoRecords(all = false) {
     STATE.records = STATE.records.filter(r => r.source !== 'demo');
   }
   const removed = before - STATE.records.length;
+  saveRecords();
   // 既然用户要清虚拟数据,就把数据源切到真实模式(避免演示流又生成新假数据)
   if (!all) {
     STATE.source = 'room';
@@ -319,29 +414,47 @@ function setSource(mode) {
 function getDates() {
   const dates = [];
   for (let i = 0; i < 3; i++) {
-    const d = new Date(Date.now() - i * 86400000);
+    const d = new Date(nowMs() - i * 86400000);
     dates.push(dateStr(d));
   }
-  return { dates, today: dateStr() };
+  for (const r of STATE.records) dates.push(dateStr(new Date(r.ts)));
+  return { dates: [...new Set(dates)].sort().reverse(), today: dateStr() };
 }
 
-function getStats() {
-  const female = STATE.records.filter(r => r.sex === 'female').length;
-  const male = STATE.records.filter(r => r.sex === 'male').length;
-  const realCount = STATE.records.filter(r => r.source === 'room').length;
+function getCollectionCoverage() {
+  const roomRecords = STATE.records.filter(r => r.source === 'room');
   return {
-    femaleCount: female,
-    maleCount: male,
-    todayTotal: STATE.records.length,
-    realCount,
-    source: STATE.source,
-    updatedAt: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+    knownVerifiedUids: [...new Set(roomRecords.filter(r => r.uidReal === true && /^\d+$/.test(String(r.uid))).map(r => String(r.uid)))],
+    knownRoomNames: [...new Set(roomRecords.map(r => String(r.room || '').trim()).filter(Boolean))],
   };
 }
 
-function getRecords(date, sex, page = 1, size = 50) {
-  let list = STATE.records;
-  if (sex === 'female' || sex === 'male') list = list.filter(r => r.sex === sex);
+function getStats(date = dateStr()) {
+  const today = STATE.records.filter(r => dateStr(new Date(r.ts)) === (date || dateStr()));
+  const female = today.filter(r => r.sex === 'female').length;
+  const male = today.filter(r => r.sex === 'male').length;
+  const realCount = today.filter(r => r.source === 'room').length;
+  const observedAt = today.reduce((latest, r) => Math.max(latest, epoch(r.lastSeenAt,epoch(r.ts,0))), 0);
+  return {
+    femaleCount: female,
+    maleCount: male,
+    todayTotal: today.length,
+    unknownCount: today.filter(r => r.sex === 'unknown').length,
+    realCount,
+    verifiedCount: today.filter(r => r.source === 'room' && r.uidReal !== false).length,
+    placeholderCount: today.filter(r => r.source === 'room' && r.uidReal === false).length,
+    source: STATE.source,
+    updatedAt: observedAt ? new Date(observedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '--:--',
+  };
+}
+
+function getRecords(date, sex, page = 1, size = 50, keyword = '') {
+  let list = STATE.records.filter(r => !date || dateStr(new Date(r.ts)) === date);
+  const query = String(keyword || '').trim().toLocaleLowerCase();
+  if (query) list = list.filter(r => [r.uid, r.nickname, r.room].some(value => String(value || '').toLocaleLowerCase().includes(query)));
+  size = Number.isFinite(Number(size)) && Number(size) > 0 ? Math.max(1, Math.min(500, Math.floor(Number(size)))) : 50;
+  page = Number.isFinite(Number(page)) ? Math.floor(Number(page)) : 1;
+  if (sex === 'female' || sex === 'male' || sex === 'unknown') list = list.filter(r => r.sex === sex);
   const total = list.length;
   const pages = Math.max(1, Math.ceil(total / size));
   const p = Math.min(Math.max(1, page), pages);
@@ -355,9 +468,10 @@ function getRecords(date, sex, page = 1, size = 50) {
 function getSummary(date) {
   const buckets = {};
   for (const r of STATE.records) {
+    if (date && dateStr(new Date(r.ts)) !== date) continue;
     const h = new Date(r.ts).getHours();
-    if (!buckets[h]) buckets[h] = { hour: h, female: [], male: [], ids: [] };
-    buckets[h][r.sex].push(r);
+    if (!buckets[h]) buckets[h] = { hour: h, female: [], male: [], unknown: [], ids: [] };
+    buckets[h][['female','male'].includes(r.sex) ? r.sex : 'unknown'].push(r);
     buckets[h].ids.push(r.uid);
   }
   return Object.keys(buckets).sort((a, b) => a - b).map(h => {
@@ -368,10 +482,11 @@ function getSummary(date) {
       count: b.ids.length,
       femaleCount: b.female.length,
       maleCount: b.male.length,
+      unknownCount: b.unknown.length,
       ids: b.ids,
       // 预览用精简列表
-      preview: [...b.female, ...b.male].map(r => ({
-        uid: r.uid, sex: r.sex, guild: r.guild, nickname: r.nickname,
+      preview: [...b.female, ...b.male, ...b.unknown].map(r => ({
+        uid: r.uid, sex: r.sex, guild: r.guild, guildKnown: r.guildKnown, nickname: r.nickname, source: r.source, uidReal: r.uidReal, online: r.online, roomCode: r.roomCode, seenFrom: r.seenFrom, lastSeenAt: r.lastSeenAt,
       })),
     };
   });
@@ -383,9 +498,7 @@ function getTargetsByHour(date, hour, gender, guild) {
   let list = [];
   if (hour === 'auto' || hour === '' || hour == null) {
     // 自动:取全部(女在前男在后)
-    const allF = [], allM = [];
-    for (const b of summary) { allF.push(...b.preview.filter(p => p.sex === 'female')); allM.push(...b.preview.filter(p => p.sex === 'male')); }
-    list = [...allF, ...allM];
+    list = summary.flatMap(b => b.preview);
   } else {
     const b = summary.find(x => String(x.hour) === String(hour));
     if (b) list = b.preview;
@@ -393,7 +506,7 @@ function getTargetsByHour(date, hour, gender, guild) {
   if (gender === 'f') list = list.filter(p => p.sex === 'female');
   if (gender === 'm') list = list.filter(p => p.sex === 'male');
   if (guild === 'has') list = list.filter(p => p.guild);
-  if (guild === 'none') list = list.filter(p => !p.guild);
+  if (guild === 'none') list = list.filter(p => p.guildKnown === true && !p.guild);
   return list.map(p => p.uid);
 }
 
@@ -409,6 +522,7 @@ function getStatus() {
     lastCollectAt: STATE.lastCollectAt,
     lastCollectRoom: STATE.lastCollectRoom,
     collectError: STATE.collectError,
+    recoveryRequired: !!STATE.recoveryRequired,
   };
 }
 
@@ -417,7 +531,7 @@ function recordSend(machineCode, task) {
   const key = `${machineCode}:${task}`;
   const today = dateStr();
   if (!STATE.stats[key]) STATE.stats[key] = {};
-  const now = new Date();
+  const now = new Date(nowMs());
   const dayKey = today;
   const weekKey = `${now.getFullYear()}-W${weekOfYear(now)}`;
   const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -435,18 +549,26 @@ function weekOfYear(d) {
 function getCounts(machineCode, task) {
   const key = `${machineCode}:${task}`;
   const s = STATE.stats[key] || {};
-  const now = new Date();
-  return {
+  const now = new Date(nowMs());
+  const counts = {
     today: s[dateStr(now)] || 0,
     week: s[`${now.getFullYear()}-W${weekOfYear(now)}`] || 0,
     month: s[`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`] || 0,
   };
+  for (const r of STATE.outcomes || []) {
+    if (r.mode !== 'android' || r.outcome !== 'confirmed_ui' || r.machineCode !== machineCode || (r.task || 'private') !== task) continue;
+    const at = new Date(r.at);
+    if (dateStr(at) === dateStr(now)) counts.today++;
+    if (at.getFullYear() === now.getFullYear() && weekOfYear(at) === weekOfYear(now)) counts.week++;
+    if (at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth()) counts.month++;
+  }
+  return counts;
 }
 
 function isSentToday(machineCode, uid) {
   const today = dateStr();
   const bucket = STATE.sentToday[today] || {};
-  return (bucket[machineCode] || []).includes(uid);
+  return (bucket[machineCode] || []).includes(String(uid)) || STATE.outcomes.some(r => r.mode === 'android' && r.outcome === 'confirmed_ui' && r.machineCode === machineCode && r.targetUid === String(uid) && dateStr(new Date(r.at)) === today);
 }
 
 function markSent(machineCode, uid) {
@@ -473,11 +595,55 @@ function getMachineCode() {
   return 'DEMO-MACHINE';
 }
 
-module.exports = {
-  init, getConfig, setConfig, allConfig,
+function getLegacyCounts(machineCode, task) {
+  const real = STATE.stats, outcomes = STATE.outcomes; STATE.stats = STATE.legacyStats; STATE.outcomes = [];
+  try { return getCounts(machineCode, task); } finally { STATE.stats = real; STATE.outcomes = outcomes; }
+}
+function recordOutcome(result) {
+  if (STATE.recoveryRequired) throw Error('DATA_RECOVERY_REQUIRED: Outcome journal was recovered from an older backup; verify it before sending');
+  const record = { ...result, targetUid: String(result.targetUid || ''), at: nowMs() };
+  if (record.runId && record.outcome === 'confirmed_ui') {
+    const prior = STATE.outcomes.find(r => r.runId === record.runId && r.machineCode === record.machineCode && r.targetUid === record.targetUid && (r.task || 'private') === (record.task || 'private') && r.mode === record.mode && r.outcome === 'confirmed_ui');
+    if (prior) return prior;
+  }
+  const next = [...STATE.outcomes, record];
+  saveJson(STATE.outcomesFile, { schemaVersion: 2, results: next }); STATE.outcomes = next;
+  // Counts and dedup derive from this single durable journal. No cross-file commit.
+  return record;
+}
+function getPendingResults() {
+  const latest = new Map();
+  for (const r of STATE.outcomes) {
+    if (r.mode !== 'android' || (r.task || 'private') !== 'private') continue;
+    const key = `${r.machineCode}:${r.targetUid}`;
+    if (r.outcome === 'unconfirmed') latest.set(key, r);
+    if (r.runId && latest.get(key)?.runId === r.runId && isDefinitiveSendRejection(r,r.targetUid)) latest.delete(key);
+    if (r.outcome === 'confirmed_ui' || (r.manualResolution === 'not_sent' && latest.get(key)?.runId === r.runId)) latest.delete(key);
+  }
+  return [...latest.values()];
+}
+function isPending(machineCode, uid) { return !!STATE.recoveryRequired || getPendingResults().some(r => r.machineCode === machineCode && r.targetUid === String(uid)); }
+function resolvePending({ machineCode, targetUid, runId, resolution } = {}) {
+  if (STATE.recoveryRequired) throw Error('DATA_RECOVERY_REQUIRED: Verify the recovered journal before resolving results');
+  if (!['confirmed', 'not_sent'].includes(resolution)) throw Error('INVALID_RESOLUTION');
+  const uid = String(targetUid || '');
+  if (!machineCode || !uid || !runId) throw Error('PENDING_NOT_FOUND');
+  const pending = getPendingResults().find(r => r.machineCode === machineCode && r.targetUid === uid && r.runId === runId);
+  if (!pending) {
+    const prior = STATE.outcomes.find(r => r.machineCode === machineCode && r.targetUid === uid && r.runId === runId && r.manualResolution === resolution);
+    if (prior) return prior;
+    throw Error('PENDING_NOT_FOUND');
+  }
+  return recordOutcome({ ...pending, outcome: resolution === 'confirmed' ? 'confirmed_ui' : 'failed', stage: 'manual_review', reason: resolution === 'confirmed' ? 'MANUALLY_CONFIRMED' : 'MANUALLY_NOT_SENT', manualResolution: resolution, evidence: { ...pending.evidence, manualReview: true, resolution } });
+}
+return {
+  init, shutdown, recordOutcome, resolvePending, isPending, getPendingResults, getLegacyCounts, getConfig, setConfig, allConfig,
   getDates, getStats, getRecords, getSummary, getTargetsByHour, getStatus,
   setStreamCallback, recordSend, getCounts, isSentToday, markSent,
   pushSystemLog, getMachineCode,
   // 真实数据采集
-  ingestRealRecords, reportCollectError, reportCollectRoom, setSource, clearDemoRecords,
+  ingestRealRecords, getCollectionCoverage, reportCollectError, reportCollectRoom, setSource, clearDemoRecords,
 };
+
+}
+module.exports = { ...createDataStore(), createDataStore };

@@ -67,9 +67,9 @@ public class SylAccessibilityService extends AccessibilityService {
     }
 
     // ================= 指令入口 =================
-    public String handle(String cmd, String id, String value, int x, int y, String out) {
+    public String handle(String cmd, String id, String value, int x, int y, String out, String requestId) {
         try {
-            if ("dump".equals(cmd)) return doDump(out == null ? filesDir() + "/syl_ui.json" : out);
+            if ("dump".equals(cmd)) return doDump(out, requestId);
             if ("tap".equals(cmd)) return doTapId(id);
             if ("tapxy".equals(cmd)) return doTap(x, y);
             if ("text".equals(cmd)) return doSetText(id, value);
@@ -84,7 +84,7 @@ public class SylAccessibilityService extends AccessibilityService {
         }
     }
 
-    private String doDump(String outPath) {
+    private String doDump(String outPath, String requestId) throws Exception {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         String act = "";
         try {
@@ -92,8 +92,10 @@ public class SylAccessibilityService extends AccessibilityService {
                     ? getWindows().get(0).getRoot() : null;
             if (wi != null) root = root != null ? root : wi;
         } catch (Exception ignored) {}
-        String json = Dumper.dumpTree(root, act);
-        boolean ok = writeFile(outPath, json);
+        org.json.JSONObject tree = new org.json.JSONObject(Dumper.dumpTree(root, act));
+        tree.put("requestId", requestId).put("protocolVersion", CommandReceiver.PROTOCOL_VERSION);
+        String json = tree.toString();
+        boolean ok = CommandReceiver.writeAtomic(new File(outPath), json);
         return "{\"ok\":" + ok + ",\"out\":\"" + esc(outPath) + "\",\"rootNull\":" + (root == null) + "}";
     }
 
@@ -113,7 +115,7 @@ public class SylAccessibilityService extends AccessibilityService {
         for (int i = 0; i < 4 && cur != null; i++) {
             if (cur.isClickable()) {
                 boolean ok = cur.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                if (ok) return "{\"ok\":true,\"via\":\"ACTION_CLICK\",\"tag\":\"" + esc(tag) + "\"}";
+                return "{\"ok\":" + ok + ",\"via\":\"ACTION_CLICK\",\"tag\":\"" + esc(tag) + "\"}";
             }
             cur = cur.getParent();
         }

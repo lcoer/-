@@ -2,6 +2,7 @@
 const Copywriting = (function () {
   const api = window.api;
   let cfg = null;
+  let pendingSave = Promise.resolve();
 
   const listEl = document.getElementById('copywritingList');
 
@@ -20,6 +21,12 @@ const Copywriting = (function () {
     const voice = cfg.voice || {};
     document.getElementById('copyImageEnable').checked = !!img.enable;
     document.getElementById('copyVoiceEnable').checked = !!voice.enable;
+    // Existing enabled attachments can be switched off; new unsupported attachments cannot be enabled.
+    document.getElementById('copyImageEnable').disabled = !img.enable;
+    document.getElementById('copyVoiceEnable').disabled = !voice.enable;
+    document.getElementById('copyImagePickBtn').disabled = true;
+    document.getElementById('copyVoicePickBtn').disabled = true;
+    document.querySelector('input[name="copyMode"][value="mediaonly"]').disabled = true;
 
     if (img.path) {
       document.getElementById('copyImageFileInfo').hidden = false;
@@ -40,9 +47,38 @@ const Copywriting = (function () {
     }
   }
 
+  function includeDraft() {
+    const input = document.getElementById('copywritingNewInput');
+    const text = input.value.trim();
+    if (!text) return;
+    cfg.contents.push(text);
+    input.value = '';
+    render();
+  }
+
+  function persist() {
+    if (!cfg) return Promise.reject(Error('文案尚未加载，请稍后再试'));
+    const snapshot = JSON.parse(JSON.stringify(cfg));
+    pendingSave = pendingSave.catch(() => {}).then(async () => {
+      const result = await api.config.set('copywriting', snapshot);
+      if (!result?.ok) throw Error(result?.reason || '文案保存失败');
+      return snapshot;
+    });
+    return pendingSave;
+  }
+
+  async function flush() {
+    if (!cfg) throw Error('文案尚未加载，请稍后再试');
+    includeDraft();
+    return persist();
+  }
+
   async function save(notify) {
-    await api.config.set('copywriting', cfg);
-    if (notify) toast('文案配置已保存', 'ok');
+    try {
+      if (notify) includeDraft();
+      await persist();
+      if (notify) toast('文案配置已保存', 'ok');
+    } catch(e) { toast(e.message, 'error'); }
   }
 
   async function init() {
@@ -108,7 +144,7 @@ const Copywriting = (function () {
     });
     document.getElementById('copyImageEnable').addEventListener('change', (e) => {
       if (e.target.checked && !cfg.image.path) { toast('请先选择图片文件', 'info'); e.target.checked = false; return; }
-      cfg.image.enable = e.target.checked; save(false);
+      cfg.image.enable = e.target.checked; syncMediaUI(); save(false);
     });
 
     // 语音
@@ -124,9 +160,9 @@ const Copywriting = (function () {
     });
     document.getElementById('copyVoiceEnable').addEventListener('change', (e) => {
       if (e.target.checked && !cfg.voice.path) { toast('请先选择音频文件', 'info'); e.target.checked = false; return; }
-      cfg.voice.enable = e.target.checked; save(false);
+      cfg.voice.enable = e.target.checked; syncMediaUI(); save(false);
     });
   }
 
-  return { init };
+  return { init, flush };
 })();

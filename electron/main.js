@@ -35,6 +35,12 @@
 const electron = require('electron');
 const { app, BrowserWindow, Menu, globalShortcut, ipcMain, dialog } = electron;
 
+// Isolated application data for local smoke tests and development instances.
+if (app && process.env.SYBL_USER_DATA_DIR) {
+  require('fs').mkdirSync(process.env.SYBL_USER_DATA_DIR, { recursive: true });
+  app.setPath('userData', process.env.SYBL_USER_DATA_DIR);
+}
+
 // 若被误以 Node 模式启动(ELECTRON_RUN_AS_NODE 非空),app 会是 undefined,
 // 直接给出可读报错并退出,避免"一闪而过"的静默失败。
 if (!app) {
@@ -94,40 +100,8 @@ const { registerTaskIpc } = require('./ipc/task-ipc');
 const { registerSystemIpc } = require('./ipc/system-ipc');
 
 // 内置静态文件服务(提供 design/ 下的 UI 文件;用本地 HTTP 而非 file:// 避免 ES 模块 CORS 限制)
-const STATIC_PORT = 39110;
-function startStaticServer() {
-  const designDir = path.join(__dirname, '..', 'design');
-  const mime = {
-    '.html': 'text/html; charset=utf-8',
-    '.css': 'text/css; charset=utf-8',
-    '.js': 'text/javascript; charset=utf-8',
-    '.json': 'application/json; charset=utf-8',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.svg': 'image/svg+xml',
-    '.ico': 'image/x-icon',
-    '.woff2': 'font/woff2',
-  };
-  return new Promise((resolve) => {
-    const server = http.createServer((req, res) => {
-      let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
-      if (urlPath === '/') urlPath = '/index.html';
-      // 防目录穿越
-      const filePath = path.join(designDir, path.normalize(urlPath).replace(/^(\.\.[/\\])+/, ''));
-      if (!filePath.startsWith(designDir)) {
-        res.writeHead(403); res.end('Forbidden'); return;
-      }
-      fs.readFile(filePath, (err, data) => {
-        if (err) { res.writeHead(404); res.end('Not Found'); return; }
-        res.writeHead(200, { 'Content-Type': mime[path.extname(filePath).toLowerCase()] || 'application/octet-stream' });
-        res.end(data);
-      });
-    });
-    server.on('error', () => resolve(STATIC_PORT)); // 端口占用则复用
-    server.listen(STATIC_PORT, '127.0.0.1', () => resolve(STATIC_PORT));
-  });
-}
+const { startStaticServer } = require('./services/static-server');
+let staticServer = null;
 
 const IS_DEV = process.env.NODE_ENV === 'development';
 let mainWindow = null;
@@ -154,6 +128,10 @@ async function createWindow(port) {
     },
   });
   LOG('win', 'BrowserWindow 已构造');
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url !== `http://127.0.0.1:${port}/index.html`) event.preventDefault();
+  });
 
   Menu.setApplicationMenu(null);
 
@@ -227,7 +205,9 @@ app.whenReady().then(async () => {
   const LOG = (t, m) => global.__sylog && global.__sylog(t, m);
   try {
     LOG('boot', 'app ready');
-    const port = await startStaticServer();
+    const service = await startStaticServer();
+    staticServer = service.server;
+    const port = service.port;
     LOG('boot', `静态服务端口=${port}`);
 
     // 初始化数据存储与应用元信息
@@ -263,6 +243,11 @@ app.whenReady().then(async () => {
     });
   } catch (e) {
     LOG('fatal', 'whenReady 内异常 ' + ((e && e.stack) || e));
+    dataStore.shutdown();
+    staticServer?.closeAllConnections?.();
+    staticServer?.close();
+    dialog.showErrorBox('双鱼助手无法启动', `初始化失败：${e.message}\n\n请保留用户数据文件和备份，核对恢复后再启动。`);
+    app.exit(1);
   }
 });
 
@@ -274,8 +259,24 @@ app.on('second-instance', () => {
   }
 });
 
-app.on('before-quit', () => {
-  taskRunner.stopAll().catch(() => {});
+let shutdownComplete = false;
+let shutdownStarted = false;
+app.on('before-quit', (event) => {
+  if (shutdownComplete) return;
+  event.preventDefault();
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  const deadline = new Promise(resolve => {
+    const timer = setTimeout(() => { global.__sylog?.('shutdown', '任务收尾超过 8 秒'); resolve(); }, 8000);
+    timer.unref();
+  });
+  Promise.race([taskRunner.stopAll(), deadline]).catch(e => global.__sylog?.('shutdown', e.message)).finally(() => {
+    dataStore.shutdown();
+    staticServer?.close();
+    staticServer?.closeAllConnections?.();
+    shutdownComplete = true;
+    app.quit();
+  });
 });
 
 app.on('will-quit', () => {

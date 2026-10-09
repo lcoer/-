@@ -5,7 +5,8 @@
 
 import { findById, findByText } from './adb-client.mjs';
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
+import { proveSendRejection, hasUncertainSendFailure } from './send-proof.cjs';
 
 // 各页面特征控件(用于识别当前在哪个页面)
 const PAGE_MARKERS = {
@@ -47,8 +48,8 @@ export async function waitFor(adb, predicate, { timeout = 8000, interval = 600, 
     try {
       last = await adb.dumpUi();
       if (predicate(last.nodes, last)) return last;
-    } catch { /* dump 偶发失败,重试 */ }
-    await sleep(interval);
+    } catch (e) { if (isAbortError(e)) throw e; }
+    await abortableSleep(interval, adb.signal);
   }
   throw new Error(`WAIT_TIMEOUT(${desc}): 等待 ${timeout}ms 未满足条件`);
 }
@@ -90,7 +91,7 @@ export async function ensureMainPage(adb, { maxBack = 4 } = {}) {
   if (hasTab) return nodes;
   for (let i = 0; i < maxBack; i++) {
     await adb.back();
-    await sleep(900);
+    await abortableSleep(900, adb.signal);
     const r = await adb.dumpUi();
     if (r.nodes.some(n => n.shortId === 'll_tab_message' || n.shortId === 'tv_tab_message')) {
       return r.nodes;
@@ -106,14 +107,14 @@ export async function switchTab(adb, tab) {
   if (!id) throw new Error(`UNKNOWN_TAB(${tab})`);
   const nodes = await ensureMainPage(adb);
   await tapById(adb, nodes, id, { preferClickable: false });
-  await sleep(1200);
+  await abortableSleep(1200, adb.signal);
 }
 
 // 从聊天窗口返回
 export async function goBack(adb, times = 1) {
   for (let i = 0; i < times; i++) {
     await adb.back();
-    await sleep(800);
+    await abortableSleep(800, adb.signal);
   }
 }
 
@@ -148,16 +149,18 @@ export async function openConversation(adb, nickname, { maxScroll = 4 } = {}) {
   for (let s = 0; s <= maxScroll; s++) {
     const { nodes } = await adb.dumpUi();
     const convs = await readConversations(adb, nodes);
-    const hit = convs.find(c => c.nickname === nickname) ||
-                convs.find(c => c.nickname.includes(nickname));
+    const matches = convs.filter(c => c.nickname === nickname && !c.isSystem && !c.isStranger);
+    if (matches.length > 1) throw new Error('AMBIGUOUS_NICKNAME');
+    const hit = matches[0];
     if (hit) {
       await adb.tap(hit.x, hit.y);
       await waitById(adb, 'input_message', { timeout: 8000, desc: '聊天窗口打开' });
       return hit;
     }
+    if (s === maxScroll) break;
     // 没找到 → 上滑加载更多
     await adb.swipe(540, 1400, 540, 700, 400);
-    await sleep(1000);
+    await abortableSleep(1000, adb.signal);
   }
   throw new Error(`CONVERSATION_NOT_FOUND(${nickname})`);
 }
@@ -186,76 +189,96 @@ export function lastMessage(nodes) {
 
 // ===== 聊天窗口:输入并发送(核心) =====
 // 支持中文(自动走 ADBKeyboard)
-export async function typeAndSend(adb, text, {
-  onLog = () => {},
-  sendTimeout = 6000,
-  verifyGapMs = 1200,
-} = {}) {
-  // 1. 找到并点击输入框
-  let { nodes } = await adb.dumpUi();
-  const input = findById(nodes, 'input_message')[0];
-  if (!input) throw new Error('INPUT_BOX_NOT_FOUND');
-  await adb.tap(input.centerX, input.centerY);
-  await sleep(700);
-
-  // 2. 清空残留
-  const cur = findById((await adb.dumpUi()).nodes, 'input_message')[0];
-  const hasPlaceholder = !cur || cur.text === '请输入消息...';
-  if (!hasPlaceholder && cur.text) {
-    onLog('info', '输入框有残留内容,清空中...');
-    await adb.clearInputField();
-    await sleep(400);
+export async function typeAndSend(adb, text, { onLog = () => {}, onBeforeSend, sendTimeout = 6000, verifyGapMs = 1200, signal = adb.signal, dump, setText } = {}) {
+  let clicked = false, stage = 'validate', originalIme = null;
+  const evidence = {};
+  const result = (outcome, reason) => ({ ok: outcome === 'confirmed_ui', status: outcome, outcome, stage, reason, evidence, typed: evidence.inputMatched === true });
+  if (!String(text || '').trim()) return result('failed', 'EMPTY_TEXT');
+  const pause = ms => abortableSleep(ms, signal);
+  const read = dump || (()=>adb.dumpUi());
+  try {
+    throwIfAborted(signal);
+    let { nodes } = await read();
+    const input = findById(nodes, 'input_message')[0];
+    if (!input) return result('failed', 'INPUT_BOX_NOT_FOUND');
+    stage = 'input';
+    if (setText) {
+      throwIfAborted(signal);
+      const cleared = await setText('');
+      if (cleared?.ok !== true) return result('failed', cleared?.error || 'BRIDGE_INPUT_CLEAR_FAILED');
+    } else {
+      originalIme = (await adb.sh('settings get secure default_input_method')).out;
+      await adb.tap(input.centerX, input.centerY);
+      await adb.switchToAdbIme();
+      await adb.clearInputField();
+      await pause(400);
+    }
+    throwIfAborted(signal);
+    const empty = findById((await read()).nodes, 'input_message')[0];
+    if (!empty || !['', '请输入消息...'].includes(empty.text)) return result('failed', 'INPUT_NOT_CLEARED');
+    if (setText) {
+      const typed = await setText(text);
+      if (typed?.ok !== true) return result('failed', typed?.error || 'BRIDGE_INPUT_SET_FAILED');
+    } else {
+      await adb.sendUnicode(text);
+      await pause(verifyGapMs);
+    }
+    throwIfAborted(signal);
+    const before = (await read()).nodes;
+    evidence.inputMatched = findById(before, 'input_message')[0]?.text === text;
+    if (!evidence.inputMatched) return result('failed', 'INPUT_MISMATCH');
+    const beforeCount = findById(before, 'rc_text').filter(n => n.text === text).length;
+    evidence.beforeExactCount = beforeCount;
+    const send = findById(before, 'iv_send')[0];
+    if (!send) return result('failed', 'SEND_BUTTON_NOT_FOUND');
+    throwIfAborted(signal);
+    await onBeforeSend?.({stage:'send', evidence});
+    throwIfAborted(signal);
+    // Persisting intent can take time. Revalidate the current recipient/input
+    // through the supplied guarded dump and locate the current send control.
+    const final = (await read()).nodes;
+    if (findById(final,'input_message')[0]?.text !== text) return result('failed','INPUT_CHANGED_BEFORE_SEND');
+    const finalSend = findById(final,'iv_send')[0];
+    if (!finalSend) return result('failed','SEND_BUTTON_NOT_FOUND');
+    evidence.beforeExactCount = findById(final,'rc_text').filter(n=>n.text===text).length;
+    const finalCount = evidence.beforeExactCount;
+    throwIfAborted(signal);
+    stage = 'send'; clicked = true;
+    await adb.tap(finalSend.centerX, finalSend.centerY);
+    stage = 'confirm';
+    let uncertaintyReason = 'CONFIRMATION_TIMEOUT';
+    const start = Date.now();
+    while (Date.now() - start < sendTimeout) {
+      await pause(Math.min(800, Math.max(1, sendTimeout)));
+      nodes = (await read()).nodes;
+      throwIfAborted(signal);
+      const now = findById(nodes, 'input_message')[0];
+      evidence.afterExactCount = findById(nodes, 'rc_text').filter(n => n.text === text).length;
+      evidence.inputCleared = !!now && ['', '请输入消息...'].includes(now.text);
+      const rejection = proveSendRejection(final, nodes, text);
+      if (rejection) {
+        evidence.rejection = rejection;
+        onLog('warn', '平台拒绝本条消息：当前账号贡献等级不够，记录失败并继续下一个用户');
+        return result('failed', rejection.reason);
+      }
+      if (hasUncertainSendFailure(final, nodes, text)) {
+        // A slow refresh can still show just the old failed history. Wait
+        // for a conclusive new row, without clicking send again.
+        uncertaintyReason = 'SEND_FAILURE_INDICATOR';
+        if (evidence.afterExactCount > finalCount) return result('unconfirmed', uncertaintyReason);
+        continue;
+      }
+      if (evidence.inputCleared && evidence.afterExactCount > finalCount) return result('confirmed_ui', 'NEW_EXACT_TEXT_VISIBLE');
+    }
+    return result('unconfirmed', uncertaintyReason);
+  } catch (e) {
+    onLog('warn', e.message);
+    return result(clicked ? 'unconfirmed' : isAbortError(e) ? 'cancelled' : 'failed', clicked ? 'POST_CLICK_UNCERTAINTY' : e.message);
+  } finally {
+    if (originalIme && /^[\w./$]+$/.test(originalIme)) {
+      const previous = adb.signal;
+      try { adb.setSignal?.(null); await adb.sh('ime set ' + originalIme, { signal: null, allowFail: true, timeout: 3000 }); } catch {}
+      finally { adb.setSignal?.(previous); }
+    }
   }
-
-  // 3. 输入
-  //    实测重要结论:统一走 ADBKeyboard 广播最稳(中英文都支持),
-  //    且【无需】把 ADBKeyboard 设为当前输入法 —— 即使系统输入法仍是拼音,
-  //    ADB_INPUT_B64 广播也能正确注入(绕开雷电强制重置输入法的问题)。
-  const wasAdb = await adb.switchToAdbIme();      // 尽力切换(失败也无妨)
-  if (!wasAdb) onLog('info', 'ADBKeyboard 未成为默认输入法,仍将使用广播方式注入(实测有效)');
-  await sleep(400);
-  const r = await adb.sendUnicode(text);
-  if (!/Broadcast completed/.test(r.out) && !r.ok) {
-    onLog('warn', 'ADB_INPUT_B64 广播可能未送达,尝试 input text 兜底');
-    if (/^[\x00-\x7F]*$/.test(text)) await adb.inputAscii(text);
-  }
-  await sleep(700);
-
-  // 4. 校验输入框内容
-  await sleep(verifyGapMs);
-  const after = findById((await adb.dumpUi()).nodes, 'input_message')[0];
-  const typed = after ? after.text : '';
-  const okInput = typed.includes(text) || (text.length > 6 && typed.length > 0);
-  if (!okInput) {
-    onLog('warn', `输入校验:期望「${text}」实际「${typed}」`);
-  }
-
-  // 5. 点发送(记录发送前消息数用于验证)
-  //    实测结论:气泡位置(side)不可靠 —— 对方发的消息也可能在右半屏。
-  //    可靠信号:① 消息列表条数增加 ② 新出现的文本 == 所发内容 ③ 输入框被清空
-  const beforeNodes = (await adb.dumpUi()).nodes;
-  const beforeTexts = findById(beforeNodes, 'rc_text').map(n => n.y + ':' + n.text);
-  const send = findById(beforeNodes, 'iv_send')[0];
-  if (!send) throw new Error('SEND_BUTTON_NOT_FOUND');
-  await adb.tap(send.centerX, send.centerY);
-
-  // 6. 验证
-  const start = Date.now();
-  let confirmed = false;
-  while (Date.now() - start < sendTimeout) {
-    await sleep(800);
-    try {
-      const { nodes: ns } = await adb.dumpUi();
-      const nowTexts = findById(ns, 'rc_text').map(n => n.y + ':' + n.text);
-      const inputNow = findById(ns, 'input_message')[0];
-      const inputCleared = !inputNow || inputNow.text === '请输入消息...' || inputNow.text === '';
-      const grew = nowTexts.length > beforeTexts.length;
-      const hasText = nowTexts.some(t => t.includes(text));
-      if (inputCleared && hasText && grew) { confirmed = true; break; }
-      // 兜底:输入框清空 + 消息数增加(内容可能被服务端规范化)
-      if (inputCleared && grew) { confirmed = true; break; }
-    } catch { /* 忽略单次 dump 失败 */ }
-  }
-
-  return { ok: confirmed, typed: !!okInput, finalText: typed };
 }

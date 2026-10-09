@@ -23,8 +23,11 @@ const Settings = (function () {
     setText('setEmuStatus', connected ? '已连接' : '未检测到');
     setText('setEmuSerial', info.serial || '--');
     setText('setEmuAdb', info.adbPath || '--');
-    setText('setEmuBridge', info.bridgeReady ? '已就绪' : (connected ? '未就绪' : '--'));
-    setText('setRunMode', connected ? '真实模式(模拟器)' : '演示模式(模拟)');
+    setText('setEmuBridge', info.bridgeReady ? '协议 v2 已就绪' : (info.bridgeServiceEnabled ? '已启用 · 尚未通过 v2 验证' : (connected ? '未就绪' : '--')));
+    const demo = info.executionMode === 'demo';
+    setText('setRunMode', demo ? '演示（不发送，不计入真实统计）' : (connected ? '真实模式' : '真实模式 · 设备未连接'));
+    const modeSelect = document.getElementById('executionMode');
+    if (modeSelect) modeSelect.value = demo ? 'demo' : 'android';
     setText('setVersion', info.version || '--');
 
     // 侧边栏 + 标题栏徽标
@@ -34,21 +37,27 @@ const Settings = (function () {
     if (connected) {
       dot.className = 'status-dot';
       text.textContent = '模拟器已连接';
-      badge.textContent = '真实模式';
-      badge.classList.add('live');
+      badge.textContent = demo ? '演示模式' : '真实模式';
+      badge.classList.toggle('live', !demo);
       setHint('');
     } else {
       dot.className = 'status-dot error';
-      text.textContent = '演示模式';
-      badge.textContent = '演示模式';
+      text.textContent = '模拟器未连接';
+      badge.textContent = demo ? '演示模式' : '设备未连接';
       badge.classList.remove('live');
     }
+    if (info.recoveryRequired) setHint('发送记录从备份恢复，可能缺少最近的发送。当前已禁止发送，请先核对数据文件并恢复完整记录。');
     return info;
   }
 
   async function init() {
     const info = await refresh();
-    if (!info.emulatorConnected) {
+    document.getElementById('executionMode').addEventListener('change', async e => {
+      const res = await api.config.set('settings', { executionMode: e.target.value });
+      toast(res?.ok ? '执行模式已保存' : (res?.reason || '保存失败'), res?.ok ? 'ok' : 'error');
+      await refresh();
+    });
+    if (!info.emulatorConnected && !info.recoveryRequired) {
       setHint('<span class="material-symbols-outlined">lightbulb</span>'
         + '使用真实模式需要:<b>① 启动雷电模拟器</b> → <b>② 在模拟器内安装并登录「双鱼部落」</b>'
         + ' → <b>③ 点「检测并连接模拟器」</b>。'
@@ -69,6 +78,7 @@ const Settings = (function () {
           setHint('<span class="material-symbols-outlined">warning</span>'
             + '模拟器已连接,但<b>无障碍桥接未就绪</b>——房间页(欢迎/打call)可能读不到控件。'
             + '请点「安装/启用无障碍桥接」修复。');
+          if (res.protocolError) toast(res.protocolError, 'error');
         }
       } else {
         toast(`连接失败: ${res.reason || '未知原因'}`, 'error');

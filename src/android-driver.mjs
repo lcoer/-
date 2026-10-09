@@ -9,8 +9,9 @@
 import { AdbClient, findById, findByText } from './adb-client.mjs';
 import { BridgeClient } from './bridge-client.mjs';
 import * as ui from './android-ui.mjs';
+import { PrivateNavigator } from './private-navigator.mjs';
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
 
 // ===== 房间页控件 id(实测,见 docs/阶段1-探测结果.md) =====
 export const ROOM_IDS = {
@@ -65,6 +66,8 @@ export class AndroidDriver {
     this.adb.setBridge(this.bridge);
   }
 
+  setSignal(signal) { this.signal = signal; this.adb.setSignal?.(signal); this.bridge.setSignal?.(signal); return this; }
+
   log(level, msg) { this.onLog(level, msg); }
 
   // ===== 环境检查 =====
@@ -78,13 +81,9 @@ export class AndroidDriver {
     if (!await this.adb.isAppInstalled()) {
       throw new Error('APP_NOT_INSTALLED: 模拟器中未安装双鱼部落');
     }
-    if (!await this.bridge.isServiceEnabled()) {
-      this.log('warn', '无障碍桥接服务未启用,正在启用...');
-      const ok = await this.bridge.enableService();
-      if (!ok) {
-        throw new Error('BRIDGE_NOT_ENABLED: 请在模拟器「设置-无障碍」中手动开启 SYL Bridge');
-      }
-    }
+    if (!await this.bridge.isInstalled()) throw new Error('BRIDGE_NOT_INSTALLED: 请安装新版 SYL Bridge APK');
+    if (!await this.bridge.isServiceEnabled()) throw new Error('BRIDGE_NOT_ENABLED: 请在模拟器「设置-无障碍」中手动开启 SYL Bridge');
+    if(requireRoom && !await this._isRoomPage()) throw new Error('NOT_IN_FOREGROUND_ROOM');
     return true;
   }
 
@@ -104,6 +103,7 @@ export class AndroidDriver {
       const r = await this.adb.dumpUi();
       return { ok: true, nodes: r.nodes, count: r.nodes.length, xml: r.xml };
     } catch (e) {
+      if(isAbortError(e)) throw e;
       this.log('warn', `uiautomator dump 失败(${e.message.slice(0, 40)}),改用桥接服务`);
       return this.bridge.dumpUi(opts);
     }
@@ -115,21 +115,24 @@ export class AndroidDriver {
       // 只看当前前台,不能全串匹配 —— 历史任务栈里会残留 RoomPageActivity 字样,会误判
       const m = r.out.match(/topResumedActivity=\S+\s+\S+\s+(\S+)/);
       const top = m ? m[1] : '';
-      return top.includes('RoomPageActivity');
-    } catch { return false; }
+      return top.startsWith(APP.pkg + '/') && top.includes('RoomPageActivity');
+    } catch (e) { if (isAbortError(e)) throw e; return false; }
   }
 
   // 强制用桥接 dump(房间页)
-  async dumpRoom(opts = {}) { return this.bridge.dumpUi(opts); }
+  async dumpRoom(opts = {}) {
+    throwIfAborted(this.signal);
+    if (!await this._isRoomPage()) throw new Error('NOT_IN_FOREGROUND_ROOM');
+    return this.bridge.dumpUi(opts);
+  }
 
   // ===== 点击(按 id) =====
-  // 优先走 bridge ACTION_CLICK(更可靠,元素被遮挡也能点);失败回落坐标点击
+  // A bridge timeout may follow a completed click, so never retry by coordinates.
   async tapId(id, { nodes = null, index = 0, useBridge = false } = {}) {
     if (useBridge || this.forceBridge) {
       const r = await this.bridge.tapById(id);
       if (r && r.ok) return r;
-      this.log('warn', `桥接点击 ${id} 失败,回落坐标点击`);
-      await sleep(300);
+      throw new Error(r?.error || 'BRIDGE_CLICK_UNCONFIRMED');
     }
     const ns = nodes || (await this.dump()).nodes;
     const list = findById(ns, id);
@@ -154,44 +157,37 @@ export class AndroidDriver {
   // 功能 1:自动私聊(写作业)
   // ===================================================================
   /**
-   * 打开指定昵称的会话并发送文本
-   * @param {string} nickname 目标昵称(消息列表里的展示名)
+   * 按 expectedUid 搜索用户，核对身份后打开首次/已有私聊并发送文本。
+   * @param {string|null} nickname 采集时的昵称，仅作展示；定位使用用户ID
    * @param {string} text 要发送的内容(支持中文)
    */
-  async sendPrivateMessage(nickname, text, { onLog } = {}) {
-    const log = onLog || ((l, m) => this.log(l, m));
-
-    // 1. 确保在消息页
-    await this.adb.launchApp({ waitMs: 8000 });
-    await ui.switchTab(this.adb, 'message');
-    await sleep(1200);
-
-    // 2. 处理"陌生人消息"分组:若目标在分组内,先进入分组
-    let { nodes } = await this.dump();
-    let convs = await ui.readConversations(this.adb, nodes);
-    let target = convs.find(c => c.nickname === nickname) || convs.find(c => c.nickname.includes(nickname));
-
-    if (!target) {
-      const stranger = convs.find(c => c.isStranger);
-      if (stranger) {
-        log('info', '进入陌生人消息分组查找...');
-        await this.adb.tap(stranger.x, stranger.y);
-        await sleep(1800);
-        ({ nodes } = await this.dump());
-        convs = await ui.readConversations(this.adb, nodes);
-        target = convs.find(c => c.nickname === nickname) || convs.find(c => c.nickname.includes(nickname));
-      }
+  async sendPrivateMessage(nickname, text, { expectedUid, signal = this.signal, onLog, onBeforeSend } = {}) {
+    this.setSignal(signal);
+    const fail = (reason, stage = 'identity') => ({ok:false, outcome:'failed',status:'failed',reason,stage,evidence:{expectedUid}});
+    if (!/^\d+$/.test(String(expectedUid || ''))) return fail('EXPECTED_UID_REQUIRED');
+    if (!String(text || '').trim()) return fail('EMPTY_TEXT','validate');
+    try {
+      throwIfAborted(signal);
+      // Reopening LaunchActivity while already in the app can strand it on
+      // the splash screen. Keep the active session and navigate its real UI.
+      if (await this.adb.isAppForeground() !== APP.pkg && !await this.adb.launchApp({ waitMs: 8000 }))
+        throw Error('APP_LAUNCH_FAILED');
+      const route = await this.openPrivateChat(String(expectedUid), {signal,onLog});
+      const profile = route.profile;
+      if (!profile) return fail('PROFILE_UID_UNREADABLE');
+      if (profile.uid !== String(expectedUid)) return {...fail('UID_MISMATCH'),evidence:{expectedUid,actualUid:profile.uid}};
+      throwIfAborted(signal);
+      const r = await ui.typeAndSend(this.adb,text,{onLog:onLog || ((l,m)=>this.log(l,m)), signal, onBeforeSend, dump:()=>route.navigator.readChat(), setText:value=>this.bridge.setText('input_message',value,{signal})});
+      return {...r,nickname:profile.nickname,text,evidence:{...r.evidence,expectedUid,actualUid:profile.uid}};
+    } catch(e) {
+      const outcome = isAbortError(e) ? 'cancelled' : 'failed';
+      return {ok:false,outcome,status:outcome,stage:'navigation',reason:e.message,evidence:{expectedUid,...(e.actualUid ? {actualUid:e.actualUid} : {})}};
     }
-    if (!target) throw new Error(`CONVERSATION_NOT_FOUND(${nickname})`);
-
-    // 3. 打开会话
-    await this.adb.tap(target.x, target.y);
-    await ui.waitById(this.adb, 'input_message', { timeout: 9000, desc: '聊天窗口' });
-    await sleep(800);
-
-    // 4. 输入并发送
-    const r = await ui.typeAndSend(this.adb, text, { onLog: log });
-    return { ok: r.ok, nickname, text };
+  }
+  async openPrivateChat(uid, {signal=this.signal,onLog} = {}) {
+    const navigator = new PrivateNavigator(this, {signal,onLog:onLog || ((l,m)=>this.log(l,m))});
+    const profile = await navigator.open(uid);
+    return {profile,navigator};
   }
 
   // 按 uid 反查昵称(房间公屏/麦位上有 uid 与昵称的对应关系)
@@ -200,7 +196,7 @@ export class AndroidDriver {
     const needle = `(${uid})`;
     const codeNodes = findById(nodes, ROOM_IDS.msgUserCode).concat(findById(nodes, 'tv_nice_num'));
     for (const c of codeNodes) {
-      if (c.text.includes(needle) || c.text.includes(String(uid))) {
+      if (String(c.text).replace(/[()]/g, '').trim() === String(uid)) {
         // 同一行找昵称
         const line = nodes.filter(n => Math.abs(n.centerY - c.centerY) < 40);
         const nick = line.find(n => n.shortId === 'tv_nickname' || n.shortId === 'nickname');
@@ -221,7 +217,7 @@ export class AndroidDriver {
     const { nodes } = await this.dump();
     const nick = (findById(nodes, 'tv_nickname')[0] || {}).text || null;
     const code = (findById(nodes, 'tv_user_code')[0] || {}).text || null;
-    const uid = code ? String(code).replace(/\D/g, '') : null;
+    const uid = code && /^\(?\d+\)?$/.test(String(code).trim()) ? String(code).replace(/[()]/g, '').trim() : null;
     if (!nick || !uid) return null;
     return { uid, nickname: nick };
   }
@@ -239,13 +235,15 @@ export class AndroidDriver {
     }
     if (!target) throw new Error('PEER_AVATAR_NOT_FOUND');
     await this.adb.tap(target.centerX, target.centerY);
-    await sleep(2200);
+    await abortableSleep(2200, this.signal);
     return this.readUserProfile();
   }
 
   // 批量解析:遍历"消息页所有会话"(含陌生人分组),逐个进会话→进主页→读 uid/昵称
   // 返回 { map: { uid: nickname }, pairs: [{uid,nickname}], visited }
-  async harvestConversationUids({ onLog, maxConversations = 60 } = {}) {
+  async harvestConversationUids({ onLog, maxConversations = 60, wantedUids, signal = this.signal } = {}) {
+    this.setSignal(signal);
+    const wanted = wantedUids ? new Set(wantedUids.map(String)) : null;
     const log = onLog || ((l, m) => this.log(l, m));
     const map = {};
     const pairs = [];
@@ -254,7 +252,7 @@ export class AndroidDriver {
     // 打开 App 到消息页
     await this.adb.launchApp({ waitMs: 8000 });
     await ui.switchTab(this.adb, 'message');
-    await sleep(1500);
+    await abortableSleep(1500, this.signal);
 
     // 先在顶层收集会话(含陌生人分组入口)
     let { nodes } = await this.dump();
@@ -263,9 +261,22 @@ export class AndroidDriver {
 
     // 逐个处理函数
     const processList = async (list, label) => {
+      const handled = new Set();
+      let previousPage = '';
+      for (let page = 0; page < 12 && visited < maxConversations; page++) {
+      throwIfAborted(signal);
+      if (wanted && [...wanted].every(uid => map[uid])) return;
+      if(page) list = await ui.readConversations(this.adb,(await this.dump()).nodes);
+      const pageKey = list.map(c=>c.nickname + ':' + c.content).join('|');
+      if(page && pageKey === previousPage) break;
+      previousPage = pageKey;
       const names = list.filter(c => !c.isSystem && !c.isStranger).map(c => c.nickname);
       for (let i = 0; i < names.length && visited < maxConversations; i++) {
+        throwIfAborted(signal);
+        if (wanted && [...wanted].every(uid => map[uid])) break;
         const nick = names[i];
+        if (handled.has(nick)) continue;
+        handled.add(nick);
         try {
           log('info', `[${label} ${i + 1}/${names.length}] 解析 ${nick}...`);
           // 重新读列表(每次位置可能变),找到该会话点击
@@ -274,7 +285,7 @@ export class AndroidDriver {
           if (!hit) continue;
           await this.adb.tap(hit.x, hit.y);
           await ui.waitById(this.adb, 'input_message', { timeout: 8000, desc: '聊天窗口' });
-          await sleep(800);
+          await abortableSleep(800, this.signal);
           const prof = await this.openPeerProfileFromChat();
           if (prof) {
             map[prof.uid] = prof.nickname;
@@ -284,19 +295,25 @@ export class AndroidDriver {
             log('warn', `  → ${nick} 未能读到 uid,跳过`);
           }
           // 从主页返回聊天,再从聊天返回列表
-          await this.adb.back(); await sleep(800);
-          await this.adb.back(); await sleep(900);
+          await this.adb.back(); await abortableSleep(800, this.signal);
+          await this.adb.back(); await abortableSleep(900, this.signal);
           visited++;
         } catch (e) {
+          if(isAbortError(e)) throw e;
           log('warn', `  解析 ${nick} 出错: ${e.message.slice(0, 50)}`);
           // 尝试恢复到消息列表
           for (let k = 0; k < 3; k++) {
-            await this.adb.back(); await sleep(700);
+            await this.adb.back(); await abortableSleep(700, this.signal);
             const c = await this.dump();
             if (c.nodes.some(n => n.shortId === 'item_layout_conversation_list' ||
                                   n.shortId === 'item_layout_stranger_conversation_list')) break;
           }
         }
+      }
+      if(visited >= maxConversations || (wanted && [...wanted].every(uid=>map[uid]))) return;
+      const size = await this.adb.screenSize();
+      await this.adb.swipe(size.w/2,size.h*0.75,size.w/2,size.h*0.35,400);
+      await abortableSleep(800,signal);
       }
     };
 
@@ -304,23 +321,24 @@ export class AndroidDriver {
     await processList(convs, '会话');
 
     // 2) 陌生人分组
-    if (strangerEntry && visited < maxConversations) {
+    if (strangerEntry && visited < maxConversations && (!wanted || ![...wanted].every(uid => map[uid]))) {
       try {
         log('info', '进入陌生人消息分组...');
         await this.adb.launchApp({ waitMs: 3000 });
         await ui.switchTab(this.adb, 'message');
-        await sleep(1200);
+        await abortableSleep(1200, this.signal);
         ({ nodes } = await this.dump());
         convs = await ui.readConversations(this.adb, nodes);
         const se = convs.find(c => c.isStranger);
         if (se) {
           await this.adb.tap(se.x, se.y);
-          await sleep(1800);
+          await abortableSleep(1800, this.signal);
           const { nodes: sn } = await this.dump();
           const list2 = await ui.readConversations(this.adb, sn);
           await processList(list2, '陌生人');
         }
       } catch (e) {
+        if(isAbortError(e)) throw e;
         log('warn', '陌生人分组处理失败: ' + e.message.slice(0, 50));
       }
     }
@@ -335,50 +353,49 @@ export class AndroidDriver {
    * 房间内的轮询监听:检测公屏新出现的用户,点击欢迎
    * Android 没有 MutationObserver,改用"轮询 + 差分"
    */
-  async startAutoWelcome({ intervalMs = 2200, onEvent } = {}) {
-    const log = (l, m) => this.log(l, m);
-    let seen = new Set();
-    let clicked = 0, skipped = 0;
-    let stopped = false;
-
-    // 先建立基线
-    try {
-      const { nodes } = await this.dumpRoom();
-      seen = new Set(extractJoinEvents(nodes));
-    } catch { /* 首次失败忽略 */ }
-
-    const timer = setInterval(async () => {
-      if (stopped) return;
-      try {
-        const { nodes } = await this.dumpRoom();
-        const events = extractJoinEvents(nodes);
-        for (const key of events) {
-          if (seen.has(key)) continue;
-          seen.add(key);
-          // 新用户出现 → 尝试点击欢迎
-          const ok = await this._tryWelcome(nodes, key);
-          if (ok) { clicked++; log('ok', `已欢迎: ${key} (第 ${clicked} 次)`); }
-          else skipped++;
-          onEvent?.({ type: 'welcome', key, ok });
-        }
-      } catch (e) {
-        log('warn', '自动欢迎轮询异常: ' + e.message.slice(0, 60));
+  async startAutoWelcome({ intervalMs = 2200, onEvent, signal = this.signal } = {}) {
+    const controller = new AbortController();
+    const abort=()=>controller.abort();
+    signal?.addEventListener('abort',abort,{once:true});
+    if(signal?.aborted) controller.abort();
+    this.setSignal(controller.signal);
+    let stopped = false, clicked = 0, skipped = 0;
+    let seen;
+    try { seen = new Set(extractJoinEvents((await this.dumpRoom()).nodes)); }
+    catch(e) { signal?.removeEventListener('abort',abort); throw e; }
+    const loop = (async () => {
+      while (!stopped) {
+        try {
+          await abortableSleep(intervalMs,controller.signal);
+          const {nodes} = await this.dumpRoom();
+          if (stopped) break;
+          for (const key of extractJoinEvents(nodes)) {
+            throwIfAborted(controller.signal);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const ok = await this._tryWelcome(nodes,key);
+            if (stopped) break;
+            if(ok) clicked++; else skipped++;
+            onEvent?.({type:'welcome',key,ok});
+          }
+        } catch(e) { if(isAbortError(e)) break; this.log('warn',e.message); }
       }
-    }, intervalMs);
-
-    return {
-      stop: () => { stopped = true; clearInterval(timer); return { clickedCount: clicked, skippedCount: skipped }; },
-      getStatus: () => ({ running: !stopped, clickedCount: clicked, skippedCount: skipped }),
-    };
+    })();
+    return { stop: async () => { stopped=true;controller.abort();await loop;signal?.removeEventListener('abort',abort);return {clickedCount:clicked,skippedCount:skipped}; }, getStatus:()=>({running:!stopped,clickedCount:clicked,skippedCount:skipped}) };
   }
 
   async _tryWelcome(nodes, key) {
+    throwIfAborted(this.signal);
+    const nicknames = nodes.filter(n => [ROOM_IDS.msgNickname,ROOM_IDS.msgNicknameAlt].includes(n.shortId) && n.text === key);
+    if (nicknames.length !== 1) return false;
+    const anchor = nicknames[0];
     // 策略1:公屏消息里有"欢迎"相关的可点击按钮
-    const welcomeBtns = findById(nodes, 'cl_welcome').concat(findByText(nodes, '欢迎'));
+    const welcomeBtns = nodes.filter(n => n.shortId === 'cl_welcome' ||
+      (n.text === '欢迎' && ![ROOM_IDS.msgNickname,ROOM_IDS.msgNicknameAlt,ROOM_IDS.msgContent,ROOM_IDS.msgContentAlt].includes(n.shortId)))
+      .filter(n => Math.abs(n.centerY-anchor.centerY)<45);
+    if (welcomeBtns.filter(n=>n.clickable).length !== 1) return false;
     for (const b of welcomeBtns) {
       if (b.clickable) {
-        const r = await this.bridge.tapById(b.shortId).catch(() => null);
-        if (r && r.ok) return true;
         await this.adb.tap(b.centerX, b.centerY);
         return true;
       }
@@ -397,7 +414,7 @@ export class AndroidDriver {
     if (!input) throw new Error('ROOM_INPUT_NOT_FOUND');
     // 1. 点输入框唤起输入面板
     await this.adb.tap(input.centerX, input.centerY);
-    await sleep(1200);
+    await abortableSleep(1200, this.signal);
 
     // 2. 等待输入面板出现(et_screen_message)
     let panel = null;
@@ -405,22 +422,22 @@ export class AndroidDriver {
       const { nodes: ns } = await this.dumpRoom();
       panel = findById(ns, 'et_screen_message')[0];
       if (panel) break;
-      await sleep(500);
+      await abortableSleep(500, this.signal);
     }
     if (!panel) throw new Error('ROOM_INPUT_PANEL_NOT_FOUND');
 
     // 3. 点面板输入框聚焦 → 注入文本(走 ADBKeyboard 广播)
     await this.adb.tap(panel.centerX, panel.centerY);
-    await sleep(600);
+    await abortableSleep(600, this.signal);
     await this.adb.sendUnicode(text);
-    await sleep(800);
+    await abortableSleep(800, this.signal);
 
     // 4. 点发送按钮
     const { nodes: ns2 } = await this.dumpRoom();
     const sendBtn = findById(ns2, 'send_screen_message')[0];
     if (!sendBtn) throw new Error('ROOM_SEND_BTN_NOT_FOUND');
     await this.adb.tap(sendBtn.centerX, sendBtn.centerY);
-    await sleep(1000);
+    await abortableSleep(1000, this.signal);
 
     // 5. 校验:输入面板消失(或输入框清空)视为发送成功
     const { nodes: ns3 } = await this.dumpRoom();
@@ -435,31 +452,38 @@ export class AndroidDriver {
   /**
    * 循环发送打call表情。
    * 房间内的打call通常是:点"表情"→ 选择打call表情。
-   * 若找不到,降级为在公屏发文字"打call"。
+   * 找不到时返回不支持,不额外发送文字。
    */
-  async startAutoCall({ emoji = '打call', delayMin = 3, delayMax = 6, onEvent } = {}) {
+  async startAutoCall({ emoji = '打call', delayMin = 3, delayMax = 6, onEvent, signal = this.signal } = {}) {
     const log = (l, m) => this.log(l, m);
     let sent = 0;
     let stopped = false;
+    const controller = new AbortController();
+    const abort=()=>controller.abort();
+    signal?.addEventListener('abort',abort,{once:true});
+    if(signal?.aborted) controller.abort();
+    this.setSignal(controller.signal);
 
     const loop = (async () => {
       while (!stopped) {
         try {
           const ok = await this._sendCallOnce(emoji);
+          if (stopped) break;
           if (ok) { sent++; log('ok', `已发送 ${emoji} (第 ${sent} 次)`); }
           else log('fail', `发送 ${emoji} 失败`);
           onEvent?.({ type: 'call', sent, ok });
         } catch (e) {
+          if (isAbortError(e)) break;
           log('fail', '打call异常: ' + e.message.slice(0, 70));
         }
         if (stopped) break;
         const ms = delayMin * 1000 + Math.floor(Math.random() * (delayMax - delayMin) * 1000);
-        await sleep(ms);
+        try { await abortableSleep(ms, controller.signal); } catch(e) { if(isAbortError(e)) break; throw e; }
       }
     })();
 
     return {
-      stop: () => { stopped = true; return { sent }; },
+      stop: async () => { stopped = true; controller.abort(); await loop; signal?.removeEventListener('abort',abort); return { sent }; },
       getStatus: () => ({ running: !stopped, sent }),
     };
   }
@@ -470,7 +494,7 @@ export class AndroidDriver {
     const direct = findByText(nodes, emoji).find(n => n.clickable);
     if (direct) {
       await this.adb.tap(direct.centerX, direct.centerY);
-      await sleep(800);
+      await abortableSleep(800, this.signal);
       return true;
     }
     // 2. 打开表情面板(若已开着则跳过点击,避免误关)
@@ -480,7 +504,7 @@ export class AndroidDriver {
       panelNodes = nodes;                       // 面板已开
     } else if (emojiBtn) {
       await this.adb.tap(emojiBtn.centerX, emojiBtn.centerY);
-      await sleep(1400);
+      await abortableSleep(1400, this.signal);
       const { nodes: ns2 } = await this.dumpRoom();
       panelNodes = findById(ns2, 'rv_expression')[0] ? ns2 : null;
     }
@@ -489,27 +513,25 @@ export class AndroidDriver {
                    findByText(panelNodes, emoji)[0];
       if (item) {
         await this.adb.tap(item.centerX, item.centerY);
-        await sleep(1200);
+        await abortableSleep(1200, this.signal);
         // 实测:点击表情项后面板会【自动关闭】,且仍停留在房间页。
         // 千万不要用 adb.back() 关面板 —— 那会直接退出整个房间!
         const { nodes: ns3 } = await this.dumpRoom();
         if (findById(ns3, 'rv_expression')[0]) {
           // 面板意外未关:点公屏空白区关闭(仍不能用 back)
           await this.adb.tap(300, 1050);
-          await sleep(600);
+          await abortableSleep(600, this.signal);
         }
         return true;
       }
     }
-    // 没找到目标表情:点公屏关闭面板后降级为发文字
+    // 没找到目标表情:点公屏关闭面板后返回失败
     const { nodes: ns4 } = await this.dumpRoom();
     if (findById(ns4, 'rv_expression')[0]) {
       await this.adb.tap(300, 1050);
-      await sleep(500);
+      await abortableSleep(500, this.signal);
     }
-    // 3. 降级:公屏发文字
-    const r = await this.sendRoomMessage(emoji);
-    return r.ok;
+    return false;
   }
 }
 
@@ -517,20 +539,16 @@ export class AndroidDriver {
 // 房间公屏里"XX 来了/进入房间"这类消息的昵称,视为新用户
 export function extractJoinEvents(nodes) {
   const events = new Set();
-  const contents = findById(nodes, ROOM_IDS.msgContent);
+  const contents = findById(nodes, ROOM_IDS.msgContent).concat(findById(nodes,ROOM_IDS.msgContentAlt));
   for (const c of contents) {
     const t = c.text || '';
-    if (/来了|进入|欢迎大家|欢迎/.test(t)) {
+    if (/来了|进入房间/.test(t)) {
       // 取同行的昵称
       const line = nodes.filter(n => Math.abs(n.centerY - c.centerY) < 45);
-      const nick = line.find(n => n.shortId === ROOM_IDS.msgNickname);
+      const nick = line.find(n => n.shortId === ROOM_IDS.msgNickname || n.shortId === ROOM_IDS.msgNicknameAlt);
       if (nick && nick.text) events.add(nick.text);
       else if (t.length < 30) events.add(t);
     }
-  }
-  // 麦位上出现的新昵称也算
-  for (const w of findById(nodes, ROOM_IDS.wheatName)) {
-    if (w.text && !/贵宾席位/.test(w.text)) events.add('麦位:' + w.text);
   }
   return [...events];
 }

@@ -13,8 +13,11 @@ const Blacklist = (function () {
   }
 
   async function save(notify) {
-    await api.config.set('blacklist', parse());
-    if (notify) toast(`黑名单已保存(${parse().length} 个 ID)`, 'ok');
+    try {
+      const res = await api.config.set('blacklist', parse());
+      if (!res?.ok) throw Error(res?.reason || '保存失败');
+      if (notify) toast(`黑名单已保存(${parse().length} 个 ID)`, 'ok');
+    } catch(e) { toast(e.message, 'error'); }
   }
 
   async function init() {

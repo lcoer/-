@@ -139,7 +139,7 @@ module.exports = {
 
   // ===== 演示模式 =====
   // 未检测到官方客户端时,是否自动进入演示模式(全流程模拟,不真实发送)
-  demoAutoFallback: true,
+  demoAutoFallback: false,
 
   // ===== 真实模式强制开关 =====
   // 为 true 时即使检测不到客户端也不降级(用于排查为何进入演示模式)
@@ -168,5 +168,5 @@ module.exports = {
     sampleIntervalMs: 8000,      // 演示模式模拟采集间隔
   },
 
-  appVersion: '1.0.0',
+  appVersion: '1.3.2',
 };
