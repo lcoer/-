@@ -216,4 +216,3 @@ test('resolved hints retain historical daily observations and roll back on faile
  fs.rmdirSync(file);const r=s.ingestRealRecords([cardProof()]);assert.equal(r.resolvedHints,1);assert.equal(r.total,2);assert.equal(s.getRecords('2026-10-08').records[0].uidReal,false);s.shutdown();
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
-

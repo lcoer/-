@@ -47,8 +47,3 @@ try {
     Invoke-Checked (Join-Path $BuildTools 'zipalign.exe') @('-c','4',"$project/syl-bridge.apk")
     Get-FileHash -LiteralPath "$project/syl-bridge.apk" -Algorithm SHA256
 } finally { $env:JAVA_HOME = $oldJava }
-
-
-
-
-

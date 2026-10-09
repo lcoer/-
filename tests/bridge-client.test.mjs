@@ -75,4 +75,3 @@ test('inline stale response is never accepted and the click is broadcast once',a
  adb.adb=async args=>{if(args.includes('shell'))broadcasts++;return {out:JSON.stringify({protocolVersion:2,requestId:'stale',ok:true})};};
  const r=await new BridgeClient(adb).tapById('send',{timeout:10});assert.equal(r.ok,false);assert.equal(broadcasts,1);
 });
-
