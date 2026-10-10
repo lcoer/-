@@ -277,7 +277,7 @@ export class RoomNavigator {
     const one=id=>nodes.filter(n=>n.shortId===id).length===1;
     if(!one('iv_back'))return null;
     if(one('input_message')&&one('iv_send')&&one('tv_nickname'))return 'private-chat';
-    if(one('iv_chat')&&one('iv_follow')&&one('iv_copy')&&one('tv_nickname')&&
+    if(one('iv_chat')&&one('iv_follow')&&(one('iv_copy')||one('ll_copy'))&&one('tv_nickname')&&
       nodes.some(n=>['tv_nice_num','tv_user_code'].includes(n.shortId)&&/^\d+$/.test(n.text||'')))return 'full-profile';
     if(one('et_search')&&one('tv_search'))return 'search-entry';
     if(one('et_search')&&one('tv_cancel')&&nodes.some(n=>n.text==='用户'&&n.clickable))return 'search-results';

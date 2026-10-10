@@ -10,11 +10,12 @@ export function parseLocalTargets(value = '') {
 export function normalizeTargets(input, { demo = false } = {}) {
   const targets = [], rejected = [], duplicates = [], seen = new Set();
   for (const raw of Array.isArray(input) ? input : []) {
+    if (raw == null || (typeof raw !== 'string' && (typeof raw !== 'object' || Array.isArray(raw)))) { rejected.push({ uid: '', reason: 'INVALID_TARGET' }); continue; }
     const t = raw && typeof raw === 'object' ? raw : { uid: raw, source: 'local' };
-    const uid = String(t.uid ?? '').trim();
+    const uid = typeof t.uid === 'string' ? t.uid.trim() : '';
     const nickname = typeof t.nickname === 'string' ? t.nickname.trim() : '';
     let reason = null;
-    if (!/^\d+$/.test(uid) || t.uidReal === false) reason = 'UID_NOT_VERIFIED';
+    if (!/^\d{1,32}$/.test(uid) || t.uidReal === false) reason = 'UID_NOT_VERIFIED';
     else if (!demo && !['local', 'room'].includes(t.source)) reason = 'INVALID_TARGET_SOURCE';
     if (reason) { rejected.push({ uid, reason }); continue; }
     if (seen.has(uid)) { duplicates.push(uid); continue; }

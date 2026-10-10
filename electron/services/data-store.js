@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { createHash } = require('node:crypto');
 const appConfig = require('../config');
+const {openOutcomeJournal} = require('./outcome-journal');
 const {isDefinitiveSendRejection} = require('../../src/send-proof.cjs');
 
 let _app = null;
@@ -57,7 +58,7 @@ function dateStr(d = new Date(nowMs())) {
 function epoch(value, fallback) {
   if (value == null || value === '') return fallback;
   const parsed = typeof value === 'number' ? value : (/^\d+$/.test(String(value)) ? Number(value) : Date.parse(value));
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 8640000000000000 ? parsed : fallback;
 }
 
 // ===== 初始化 =====
@@ -70,7 +71,7 @@ function init() {
   STATE.sourceFile = path.join(dir, 'source.json');
   STATE.recordsFile = path.join(dir, 'records-v2.json');
   STATE.outcomesFile = path.join(dir, 'outcomes-v2.json');
-  STATE.config = defaultConfig(); STATE.stats = {}; STATE.sentToday = {}; STATE.records = []; STATE.outcomes = []; STATE.legacyStats = {}; STATE.recoveryRequired = false;
+  STATE.config = defaultConfig(); STATE.stats = {}; STATE.sentToday = {}; STATE.records = []; STATE.outcomes = []; STATE.legacyStats = {}; STATE.recoveryRequired = false; STATE.collectionRecoveryRequired = false;
   if (persist) {
     loadJson(STATE.configFile, STATE.config, defaultConfig());
     STATE.config.settings = { executionMode: 'android', ...STATE.config.settings };
@@ -78,19 +79,45 @@ function init() {
     loadJson(STATE.sentFile, STATE.sentToday, {});
     loadJson(path.join(dir, 'stats.json'), STATE.legacyStats, {});
     loadJson(STATE.sourceFile, STATE.sourcePref, { source: 'room' });
-    const history = {}; loadJson(STATE.recordsFile, history, {});
-    if (history.schemaVersion === 2 && Array.isArray(history.records)) STATE.records = history.records.map(r => ({...r, lastSeenAt:epoch(r.lastSeenAt,epoch(r.ts,nowMs()))}));
+    const history = loadCollectionHistory();
+    STATE.records = history.records.map(r => ({...r, ts:epoch(r.ts,nowMs()), lastSeenAt:epoch(r.lastSeenAt,epoch(r.ts,nowMs()))}));
     const results = {}; loadJson(STATE.outcomesFile, results, {}, true);
     if (Object.keys(results).length && (results.schemaVersion !== 2 || !Array.isArray(results.results))) throw Error('DATA_CORRUPT: Invalid outcome journal schema');
     if (results.results?.some(r => !r || typeof r !== 'object' || !Number.isFinite(r.at) || typeof r.targetUid !== 'string' || !['android','demo'].includes(r.mode) || !['confirmed_ui','failed','unconfirmed','cancelled','skipped','simulated'].includes(r.outcome))) throw Error('DATA_CORRUPT: Invalid outcome journal entry');
     if (results.schemaVersion === 2 && Array.isArray(results.results)) STATE.outcomes = results.results;
   }
+  STATE.journal = persist ? openOutcomeJournal(path.join(dir, 'outcomes-v3.jsonl')) : null;
+  if (STATE.journal) { for (const result of STATE.journal.results) STATE.outcomes.push(result); STATE.recoveryRequired ||= STATE.journal.recoveryRequired; }
+  STATE.sentIndex = new Set(); STATE.pendingIndex = new Map(); STATE.confirmedIndex = new Map(); STATE.countIndex = new Map();
+  for (const result of STATE.outcomes) indexOutcome(result);
   // Legacy source preferences predate explicit execution mode and cannot opt in.
   STATE.source = STATE.config.settings?.executionMode === 'demo' ? 'demo' : 'room';
   if (STATE.source === 'demo') startDemoStream();
 }
 function shutdown() { if (STATE.timer) clearInterval(STATE.timer); STATE.timer = null; }
 function saveRecords(records = STATE.records) { saveJson(STATE.recordsFile, { schemaVersion: 2, records: records.filter(r => r.source !== 'demo') }); }
+
+function validCollectionHistory(history) {
+  const textFields = ['nickname','room','guild','roomCode','seenFrom','rongCloudId','avatar','source'];
+  return history?.schemaVersion === 2 && Array.isArray(history.records) && history.records.every(r =>
+    r && typeof r === 'object' && !Array.isArray(r) && typeof r.uid === 'string' && !!r.uid &&
+    Number.isFinite(epoch(r.ts,NaN)) && (r.uidReal == null || typeof r.uidReal === 'boolean') &&
+    (r.online == null || typeof r.online === 'boolean') && textFields.every(field => r[field] == null || typeof r[field] === 'string'));
+}
+function loadCollectionHistory() {
+  const files = [STATE.recordsFile, `${STATE.recordsFile}.bak`];
+  if (!files.some(file => fs.existsSync(file))) return {schemaVersion:2,records:[]};
+  for (let i=0;i<files.length;i++) {
+    try {
+      const history = JSON.parse(fs.readFileSync(files[i],'utf8'));
+      if (!validCollectionHistory(history)) continue;
+      // A recovered collection snapshot does not change the intact send journal.
+      STATE.collectionRecoveryRequired = i === 1;
+      return history;
+    } catch (_) {}
+  }
+  throw Error('DATA_CORRUPT: Cannot read records-v2.json or its validated backup');
+}
 
 function loadJson(file, target, fallback, critical = false) {
   try {
@@ -113,7 +140,7 @@ function saveJson(file, obj, backup = true) {
     // Never replace a valid backup with a corrupt primary file.
     let previous;
     try { previous = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-    if (previous) saveJson(`${file}.bak`, previous, false);
+    if (previous && (file !== STATE.recordsFile || validCollectionHistory(previous))) saveJson(`${file}.bak`, previous, false);
   }
   const temp = `${file}.tmp`;
   try {
@@ -230,7 +257,24 @@ function setStreamCallback(fn) { STATE.streamCallback = fn; }
 // @param {object} meta { room, source }
 // 返回 { added, updated, total }
 function ingestRealRecords(list = [], meta = {}) {
-  if (!Array.isArray(list) || !list.length) return { added: 0, updated: 0, addedVerified:0, addedUnverified:0, unchanged:0, resolvedHints:0, total: STATE.records.length };
+  meta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const inputCount = Array.isArray(list) ? list.length : 0;
+  const textLimits = {nickname:256,room:1024,guild:1024,roomCode:128,seenFrom:128,rongCloudId:256,avatar:4096};
+  meta = {...meta};
+  for (const field of ['room','roomCode','seenFrom']) {
+    if (meta[field] != null && (typeof meta[field] !== 'string' || Array.from(meta[field]).length > textLimits[field])) delete meta[field];
+  }
+  const valid = raw => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+    if (raw.uidReal != null && typeof raw.uidReal !== 'boolean') return false;
+    if (!['string','number'].includes(typeof raw.uid) || (typeof raw.uid === 'number' && !Number.isSafeInteger(raw.uid))) return false;
+    const uid = String(raw.uid).trim();
+    if (!uid || uid.length > 128 || (raw.uidReal !== false && !/^\d{1,32}$/.test(uid))) return false;
+    return Object.entries(textLimits).every(([field,limit]) => raw[field] == null || (typeof raw[field] === 'string' && Array.from(raw[field]).length <= limit));
+  };
+  list = Array.isArray(list) ? list.filter(valid) : [];
+  const rejected = inputCount - list.length;
+  if (!list.length) return { added: 0, updated: 0, addedVerified:0, addedUnverified:0, unchanged:0, resolvedHints:0, rejected, total: STATE.records.length };
   const now = nowMs();
   const t = epoch(meta.ts,now);
   let added = 0, updated = 0, addedVerified = 0, addedUnverified = 0, unchanged = 0, resolvedHints = 0;
@@ -238,19 +282,20 @@ function ingestRealRecords(list = [], meta = {}) {
   const records = STATE.records.slice();
   const removed = new Set();
   const key = r => `${r.source}:${r.uidReal !== false}:${r.uid}:${dateStr(new Date(r.ts))}`;
-  const wanted = new Set(list.filter(Boolean).map(raw => raw.uidReal === false ? String(raw.uid || '').trim() : String(raw.uid || '').replace(/\D/g,'')));
+  const wanted = new Set(list.map(raw => String(raw.uid).trim()));
   const indices = new Map();
   records.forEach((r,i)=>{ if(wanted.has(r.uid)) indices.set(key(r),i); });
 
   for (const raw of list) {
     if (!raw) continue;
     const isReal = raw.uidReal !== false;
-    // 真实 uid 只保留数字;占位 uid(n+哈希)保留原样,否则字母会被过滤掉变成乱码数字
-    let uid = raw.uid ? String(raw.uid).trim() : '';
-    if (isReal) uid = uid.replace(/\D/g, '');
+    // Preserve the validated identity; never strip characters to invent a UID.
+    const uid = String(raw.uid).trim();
     if (!uid) continue;
     const observedAt = epoch(raw.lastSeenAt,epoch(raw.ts,t));
     const ts = epoch(raw.ts,observedAt);
+    const existing = records[indices.get(key({source:'room',uidReal:isReal,uid,ts}))];
+    if (existing && observedAt < epoch(existing.lastSeenAt,epoch(existing.ts,0))) { unchanged++; continue; }
     const rec = {
       uid,
       rongCloudId: raw.rongCloudId ? String(raw.rongCloudId) : null,
@@ -270,6 +315,11 @@ function ingestRealRecords(list = [], meta = {}) {
       ts,
       time: new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
     };
+    if (['male','female'].includes(rec.sex) && raw.sexEvidence && ['gender_badge_text','gender_badge_symbol'].includes(raw.sexEvidence.kind) && raw.sexEvidence.sex===rec.sex && Number.isFinite(raw.sexEvidence.confidence) && raw.sexEvidence.confidence>=0 && raw.sexEvidence.confidence<=1) {
+      rec.sexEvidence={kind:raw.sexEvidence.kind,sex:rec.sex,confidence:raw.sexEvidence.confidence};
+      const b=raw.sexEvidence.bounds;
+      if(b&&[b.x,b.y,b.width,b.height].every(Number.isFinite)&&b.x>=0&&b.y>=0&&b.width>0&&b.height>0)rec.sexEvidence.bounds={x:b.x,y:b.y,width:b.width,height:b.height};
+    }
     // Direct user-card evidence can resolve exactly one scoped observation.
     // Keep historical days intact and never infer identity from nickname alone.
     if(raw.uidReal === true && /^\d+$/.test(String(raw.uid)) && raw.source === 'room_observation' && rec.seenFrom === 'roomProfile' && raw.evidence === 'matched_room_user_card' && rec.roomCode && raw.nickname) {
@@ -307,6 +357,7 @@ function ingestRealRecords(list = [], meta = {}) {
       }
       rec.lastSeenAt = Math.max(rec.lastSeenAt,epoch(prev.lastSeenAt,epoch(prev.ts,0)));
       const merged = {...prev,...rec};
+      if(merged.sexEvidence && merged.sexEvidence.sex!==merged.sex) delete merged.sexEvidence;
       if(Object.keys(merged).every(field=>merged[field] === prev[field])) { unchanged++; continue; }
       records[idx] = merged;
       updated++;
@@ -333,10 +384,10 @@ function ingestRealRecords(list = [], meta = {}) {
   shutdown();
 
   if (STATE.streamCallback) {
-    STATE.streamCallback({ type: 'batch', payload: { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, source: 'room', room: STATE.lastCollectRoom, at: now } });
+    STATE.streamCallback({ type: 'batch', payload: { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, rejected, source: 'room', room: STATE.lastCollectRoom, at: now } });
     STATE.streamCallback({ type: 'stats', payload: getStats() });
   }
-  return { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, total: STATE.records.length };
+  return { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, rejected, total: STATE.records.length };
 }
 
 // 采集器报告一次错误(供界面提示)
@@ -362,20 +413,11 @@ function reportCollectRoom(roomName) {
 // 返回 { removed, kept }
 function clearDemoRecords(all = false) {
   const before = STATE.records.length;
-  if (all) {
-    STATE.records = [];
-  } else {
-    STATE.records = STATE.records.filter(r => r.source !== 'demo');
-  }
-  const removed = before - STATE.records.length;
-  saveRecords();
-  // 既然用户要清虚拟数据,就把数据源切到真实模式(避免演示流又生成新假数据)
-  if (!all) {
-    STATE.source = 'room';
-    STATE.sourcePref = { source: 'room' };
-    if (STATE.sourceFile) saveJson(STATE.sourceFile, STATE.sourcePref);
-    if (STATE.timer) { clearInterval(STATE.timer); STATE.timer = null; }
-  }
+  const next = all ? [] : STATE.records.filter(r => r.source !== 'demo');
+  saveRecords(next);
+  STATE.records = next;
+  const removed = before - next.length;
+  // Clearing observations preserves the selected execution mode and stream.
   if (STATE.streamCallback) {
     STATE.streamCallback({ type: 'cleared', payload: { removed, kept: STATE.records.length, all: !!all } });
     STATE.streamCallback({ type: 'stats', payload: getStats() });
@@ -523,6 +565,7 @@ function getStatus() {
     lastCollectRoom: STATE.lastCollectRoom,
     collectError: STATE.collectError,
     recoveryRequired: !!STATE.recoveryRequired,
+    collectionRecoveryRequired: !!STATE.collectionRecoveryRequired,
   };
 }
 
@@ -555,20 +598,17 @@ function getCounts(machineCode, task) {
     week: s[`${now.getFullYear()}-W${weekOfYear(now)}`] || 0,
     month: s[`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`] || 0,
   };
-  for (const r of STATE.outcomes || []) {
-    if (r.mode !== 'android' || r.outcome !== 'confirmed_ui' || r.machineCode !== machineCode || (r.task || 'private') !== task) continue;
-    const at = new Date(r.at);
-    if (dateStr(at) === dateStr(now)) counts.today++;
-    if (at.getFullYear() === now.getFullYear() && weekOfYear(at) === weekOfYear(now)) counts.week++;
-    if (at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth()) counts.month++;
-  }
+  const indexed = STATE.countIndex.get(JSON.stringify([machineCode,task])) || {};
+  counts.today += indexed[dateStr(now)] || 0;
+  counts.week += indexed[`${now.getFullYear()}-W${weekOfYear(now)}`] || 0;
+  counts.month += indexed[`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`] || 0;
   return counts;
 }
 
 function isSentToday(machineCode, uid) {
   const today = dateStr();
   const bucket = STATE.sentToday[today] || {};
-  return (bucket[machineCode] || []).includes(String(uid)) || STATE.outcomes.some(r => r.mode === 'android' && r.outcome === 'confirmed_ui' && r.machineCode === machineCode && r.targetUid === String(uid) && dateStr(new Date(r.at)) === today);
+  return (bucket[machineCode] || []).includes(String(uid)) || STATE.sentIndex.has(JSON.stringify([machineCode,String(uid),today]));
 }
 
 function markSent(machineCode, uid) {
@@ -591,38 +631,52 @@ function pushSystemLog(level, msg) {
 }
 
 function getMachineCode() {
-  // 演示:用固定标识代替真实机器码
-  return 'DEMO-MACHINE';
+  const settings = STATE.config.settings || {};
+  const uid = String(settings.senderAccountUid || '').trim();
+  const device = String(settings.senderDeviceKey || '').trim();
+  if (!/^\d+$/.test(uid) || !device) return 'unconfigured';
+  return 'sender-'+createHash('sha256').update(JSON.stringify([uid,device])).digest('hex');
 }
-
 function getLegacyCounts(machineCode, task) {
-  const real = STATE.stats, outcomes = STATE.outcomes; STATE.stats = STATE.legacyStats; STATE.outcomes = [];
-  try { return getCounts(machineCode, task); } finally { STATE.stats = real; STATE.outcomes = outcomes; }
+  const stats = STATE.stats, index = STATE.countIndex;
+  STATE.stats = STATE.legacyStats; STATE.countIndex = new Map();
+  try { return getCounts(machineCode, task); } finally { STATE.stats = stats; STATE.countIndex = index; }
+}
+const resultKey = r => JSON.stringify([r.runId,r.machineCode,r.targetUid,r.task || 'private',r.mode]);
+function indexOutcome(r) {
+  if (r.outcome === 'confirmed_ui') STATE.confirmedIndex.set(resultKey(r),r);
+  if (r.mode !== 'android') return;
+  const task = r.task || 'private';
+  if (r.outcome === 'confirmed_ui') {
+    const at = new Date(r.at), key = JSON.stringify([r.machineCode,task]);
+    const counts = STATE.countIndex.get(key) || {};
+    for (const period of [dateStr(at),`${at.getFullYear()}-W${weekOfYear(at)}`,`${at.getFullYear()}-${String(at.getMonth()+1).padStart(2,'0')}`]) counts[period] = (counts[period] || 0)+1;
+    STATE.countIndex.set(key,counts);
+    STATE.sentIndex.add(JSON.stringify([r.machineCode,r.targetUid,dateStr(at)]));
+  }
+  if (task !== 'private') return;
+  const key = JSON.stringify([r.machineCode,r.targetUid]);
+  const pending = STATE.pendingIndex.get(key);
+  if (r.outcome === 'unconfirmed') STATE.pendingIndex.set(key,r);
+  if (r.outcome === 'confirmed_ui' || (pending && r.runId && pending.runId === r.runId && (r.manualResolution === 'not_sent' || isDefinitiveSendRejection(r,r.targetUid)))) STATE.pendingIndex.delete(key);
 }
 function recordOutcome(result) {
-  if (STATE.recoveryRequired) throw Error('DATA_RECOVERY_REQUIRED: Outcome journal was recovered from an older backup; verify it before sending');
+  if (STATE.recoveryRequired) throw Error('DATA_RECOVERY_REQUIRED: Outcome journal requires verification before sending');
   const record = { ...result, targetUid: String(result.targetUid || ''), at: nowMs() };
   if (record.runId && record.outcome === 'confirmed_ui') {
-    const prior = STATE.outcomes.find(r => r.runId === record.runId && r.machineCode === record.machineCode && r.targetUid === record.targetUid && (r.task || 'private') === (record.task || 'private') && r.mode === record.mode && r.outcome === 'confirmed_ui');
-    if (prior) return prior;
+    const prior = STATE.confirmedIndex.get(resultKey(record)); if (prior) return prior;
   }
-  const next = [...STATE.outcomes, record];
-  saveJson(STATE.outcomesFile, { schemaVersion: 2, results: next }); STATE.outcomes = next;
-  // Counts and dedup derive from this single durable journal. No cross-file commit.
+  try { if (STATE.journal) STATE.journal.append(record); }
+  catch (error) { STATE.recoveryRequired = true; throw error; }
+  STATE.outcomes.push(record); indexOutcome(record);
   return record;
 }
-function getPendingResults() {
-  const latest = new Map();
-  for (const r of STATE.outcomes) {
-    if (r.mode !== 'android' || (r.task || 'private') !== 'private') continue;
-    const key = `${r.machineCode}:${r.targetUid}`;
-    if (r.outcome === 'unconfirmed') latest.set(key, r);
-    if (r.runId && latest.get(key)?.runId === r.runId && isDefinitiveSendRejection(r,r.targetUid)) latest.delete(key);
-    if (r.outcome === 'confirmed_ui' || (r.manualResolution === 'not_sent' && latest.get(key)?.runId === r.runId)) latest.delete(key);
-  }
-  return [...latest.values()];
+function getPendingResults(machineCode) {
+  return [...STATE.pendingIndex.values()].filter(r => machineCode === undefined || r.machineCode === machineCode || r.machineCode === 'DEMO-MACHINE');
 }
-function isPending(machineCode, uid) { return !!STATE.recoveryRequired || getPendingResults().some(r => r.machineCode === machineCode && r.targetUid === String(uid)); }
+function isPending(machineCode, uid) {
+  return !!STATE.recoveryRequired || STATE.pendingIndex.has(JSON.stringify([machineCode,String(uid)])) || STATE.pendingIndex.has(JSON.stringify(['DEMO-MACHINE',String(uid)]));
+}
 function resolvePending({ machineCode, targetUid, runId, resolution } = {}) {
   if (STATE.recoveryRequired) throw Error('DATA_RECOVERY_REQUIRED: Verify the recovered journal before resolving results');
   if (!['confirmed', 'not_sent'].includes(resolution)) throw Error('INVALID_RESOLUTION');

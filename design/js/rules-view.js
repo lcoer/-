@@ -5,6 +5,8 @@ const RulesView = (function () {
   let hourly = [];
   let filterGender = 'all';
   let filterGuild = 'all';
+  let cloudRevision = 0;
+  let pendingSave = Promise.resolve();
 
   const cloudDateSel = document.getElementById('cloudDateSel');
   const cloudHourSel = document.getElementById('cloudHourSel');
@@ -48,7 +50,10 @@ const RulesView = (function () {
   }
 
   async function loadCloudData(selectedHour = 'auto') {
+    const revision = ++cloudRevision;
+    const date = cloudDateSel.value;
     const res = await api.portal.getSummary(cloudDateSel.value);
+    if (revision !== cloudRevision || date !== cloudDateSel.value) return;
     hourly = Array.isArray(res) ? res : (res?.hourly || []);
     const opts = [{ value: 'auto', label: '自动(全部时段)' }];
     for (const h of currentHourLabels()) opts.push({ value: h.value, label: `${h.label}(${h.count})` });
@@ -77,13 +82,16 @@ const RulesView = (function () {
   // 返回按 UID 搜索的目标列表，昵称仅用于展示。
   // 返回 [{ uid, nickname }]
   async function getTargets({ demo = false } = {}) {
+    const formSnapshot = JSON.stringify(readForm());
     const { parseLocalTargets, normalizeTargets } = await import('/engine/target-policy.mjs');
+    if (formSnapshot !== JSON.stringify(readForm())) throw Error('目标规则已变化，请重新启动');
     const source = $$('input[name="source"]').find(r => r.checked)?.value || 'cloud';
     if (source === 'local') {
       return parseLocalTargets(localIdList.value);
     }
     // Fetch a fresh snapshot while retaining the selected hour.
     const res = await api.portal.getSummary(cloudDateSel.value);
+    if (formSnapshot !== JSON.stringify(readForm())) throw Error('目标规则已变化，请重新启动');
     hourly = Array.isArray(res) ? res : (res?.hourly || []);
     renderPreview();
     const list = filterPreview(cloudHourSel.value, filterGender, filterGuild);
@@ -155,7 +163,7 @@ const RulesView = (function () {
     await loadCloudData(cfg?.cloudHour || 'auto');
 
     // 事件绑定
-    $$('input[name="source"]').forEach(el => el.addEventListener('change', () => { toggleSource(el.value); save(false); }));
+    $$('input[name="source"]').forEach(el => el.addEventListener('change', () => { toggleSource(el.value); return save(false); }));
     cloudDateSel.addEventListener('change', async () => { await loadCloudData(); save(false); });
     cloudHourSel.addEventListener('change', () => { renderPreview(); save(false); });
 
@@ -245,8 +253,11 @@ const RulesView = (function () {
   async function save(notify) {
     const data = readForm();
     try {
-      const res = await api.config.set('rules', data);
-      if (!res?.ok) throw Error(res?.reason || '保存失败');
+      pendingSave = pendingSave.catch(() => {}).then(async () => {
+        const res = await api.config.set('rules', data);
+        if (!res?.ok) throw Error(res?.reason || '保存失败');
+      });
+      await pendingSave;
       if (notify) toast('规则配置已保存', 'ok');
     } catch (e) { toast(e.message, 'error'); }
   }

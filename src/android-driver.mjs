@@ -1,5 +1,5 @@
 // src/android-driver.mjs - 双鱼部落 Android 驱动的业务实现
-// 对应原 CDP 方案的三条功能:自动私聊 / 自动欢迎 / 自动打call
+// Android driver: private messaging and public user collection
 //
 // 驱动选择策略(自动降级):
 //   1) 优先用 BridgeClient(无障碍服务) —— 房间页唯一可行方案
@@ -10,6 +10,7 @@ import { AdbClient, findById, findByText } from './adb-client.mjs';
 import { BridgeClient } from './bridge-client.mjs';
 import * as ui from './android-ui.mjs';
 import { PrivateNavigator } from './private-navigator.mjs';
+import {readProfileGender} from './user-gender.mjs';
 
 import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
 
@@ -23,8 +24,6 @@ export const ROOM_IDS = {
   msgUserCodeAlt: 'tv_nice_num',        // 公屏消息-用户ID(实测 id,纯数字)
   msgContent: 'tv_bubble_content',      // 公屏消息-内容
   msgContentAlt: 'content',             // 公屏消息-内容(实测 id)
-  inputMessage: 'tv_input_message',      // 房间内输入框
-  expression: 'iv_input_expression',    // 表情
   gift: 'iv_room_gift',                 // 礼物
   roomMessage: 'iv_room_message',       // 消息
   roomMore: 'iv_room_more',             // 更多
@@ -88,6 +87,7 @@ export class AndroidDriver {
   }
 
   async isAppForeground() { return this.adb.isAppForeground(); }
+  async readProfileGender(nodes,options={}) { return readProfileGender(this,nodes,{signal:this.signal,...options}); }
 
   async launchApp() { return this.adb.launchApp(); }
 
@@ -177,12 +177,17 @@ export class AndroidDriver {
       if (!profile) return fail('PROFILE_UID_UNREADABLE');
       if (profile.uid !== String(expectedUid)) return {...fail('UID_MISMATCH'),evidence:{expectedUid,actualUid:profile.uid}};
       throwIfAborted(signal);
-      const r = await ui.typeAndSend(this.adb,text,{onLog:onLog || ((l,m)=>this.log(l,m)), signal, onBeforeSend, dump:()=>route.navigator.readChat(), setText:value=>this.bridge.setText('input_message',value,{signal})});
+      const r = await ui.typeAndSend(this.adb,text,{onLog:onLog || ((l,m)=>this.log(l,m)), signal, onBeforeSend, dump:()=>route.navigator.readChat(), setText:value=>this.bridge.setText('input_message',value,{signal}), clickSend:()=>route.navigator.clickSend(text), requireOutgoingProof:true});
       return {...r,nickname:profile.nickname,text,evidence:{...r.evidence,expectedUid,actualUid:profile.uid}};
     } catch(e) {
       const outcome = isAbortError(e) ? 'cancelled' : 'failed';
       return {ok:false,outcome,status:outcome,stage:'navigation',reason:e.message,evidence:{expectedUid,...(e.actualUid ? {actualUid:e.actualUid} : {})}};
     }
+  }
+  async returnPrivateHome({signal=this.signal,onLog} = {}) {
+    const navigator = new PrivateNavigator(this, {signal,onLog:onLog || ((l,m)=>this.log(l,m))});
+    await navigator.returnHome();
+    return {ok:true};
   }
   async openPrivateChat(uid, {signal=this.signal,onLog} = {}) {
     const navigator = new PrivateNavigator(this, {signal,onLog:onLog || ((l,m)=>this.log(l,m))});
@@ -346,211 +351,6 @@ export class AndroidDriver {
     return { map, pairs, visited };
   }
 
-  // ===================================================================
-  // 功能 2:自动欢迎
-  // ===================================================================
-  /**
-   * 房间内的轮询监听:检测公屏新出现的用户,点击欢迎
-   * Android 没有 MutationObserver,改用"轮询 + 差分"
-   */
-  async startAutoWelcome({ intervalMs = 2200, onEvent, signal = this.signal } = {}) {
-    const controller = new AbortController();
-    const abort=()=>controller.abort();
-    signal?.addEventListener('abort',abort,{once:true});
-    if(signal?.aborted) controller.abort();
-    this.setSignal(controller.signal);
-    let stopped = false, clicked = 0, skipped = 0;
-    let seen;
-    try { seen = new Set(extractJoinEvents((await this.dumpRoom()).nodes)); }
-    catch(e) { signal?.removeEventListener('abort',abort); throw e; }
-    const loop = (async () => {
-      while (!stopped) {
-        try {
-          await abortableSleep(intervalMs,controller.signal);
-          const {nodes} = await this.dumpRoom();
-          if (stopped) break;
-          for (const key of extractJoinEvents(nodes)) {
-            throwIfAborted(controller.signal);
-            if (seen.has(key)) continue;
-            seen.add(key);
-            const ok = await this._tryWelcome(nodes,key);
-            if (stopped) break;
-            if(ok) clicked++; else skipped++;
-            onEvent?.({type:'welcome',key,ok});
-          }
-        } catch(e) { if(isAbortError(e)) break; this.log('warn',e.message); }
-      }
-    })();
-    return { stop: async () => { stopped=true;controller.abort();await loop;signal?.removeEventListener('abort',abort);return {clickedCount:clicked,skippedCount:skipped}; }, getStatus:()=>({running:!stopped,clickedCount:clicked,skippedCount:skipped}) };
-  }
-
-  async _tryWelcome(nodes, key) {
-    throwIfAborted(this.signal);
-    const nicknames = nodes.filter(n => [ROOM_IDS.msgNickname,ROOM_IDS.msgNicknameAlt].includes(n.shortId) && n.text === key);
-    if (nicknames.length !== 1) return false;
-    const anchor = nicknames[0];
-    // 策略1:公屏消息里有"欢迎"相关的可点击按钮
-    const welcomeBtns = nodes.filter(n => n.shortId === 'cl_welcome' ||
-      (n.text === '欢迎' && ![ROOM_IDS.msgNickname,ROOM_IDS.msgNicknameAlt,ROOM_IDS.msgContent,ROOM_IDS.msgContentAlt].includes(n.shortId)))
-      .filter(n => Math.abs(n.centerY-anchor.centerY)<45);
-    if (welcomeBtns.filter(n=>n.clickable).length !== 1) return false;
-    for (const b of welcomeBtns) {
-      if (b.clickable) {
-        await this.adb.tap(b.centerX, b.centerY);
-        return true;
-      }
-    }
-    // 策略2:房间内无欢迎按钮 → 在公屏发送一句欢迎语
-    return false;
-  }
-
-  // 在房间公屏发送文本(用于欢迎/互动)
-  // 实测:点房间内的 tv_input_message 会弹出**独立输入面板**,面板里
-  //   输入框 id = et_screen_message,发送按钮 id = send_screen_message
-  // 因此必须等这个面板出现后再输入,不能直接在 tv_input_message 上注入。
-  async sendRoomMessage(text) {
-    const { nodes } = await this.dumpRoom();
-    const input = findById(nodes, ROOM_IDS.inputMessage)[0];
-    if (!input) throw new Error('ROOM_INPUT_NOT_FOUND');
-    // 1. 点输入框唤起输入面板
-    await this.adb.tap(input.centerX, input.centerY);
-    await abortableSleep(1200, this.signal);
-
-    // 2. 等待输入面板出现(et_screen_message)
-    let panel = null;
-    for (let i = 0; i < 6; i++) {
-      const { nodes: ns } = await this.dumpRoom();
-      panel = findById(ns, 'et_screen_message')[0];
-      if (panel) break;
-      await abortableSleep(500, this.signal);
-    }
-    if (!panel) throw new Error('ROOM_INPUT_PANEL_NOT_FOUND');
-
-    // 3. 点面板输入框聚焦 → 注入文本(走 ADBKeyboard 广播)
-    await this.adb.tap(panel.centerX, panel.centerY);
-    await abortableSleep(600, this.signal);
-    await this.adb.sendUnicode(text);
-    await abortableSleep(800, this.signal);
-
-    // 4. 点发送按钮
-    const { nodes: ns2 } = await this.dumpRoom();
-    const sendBtn = findById(ns2, 'send_screen_message')[0];
-    if (!sendBtn) throw new Error('ROOM_SEND_BTN_NOT_FOUND');
-    await this.adb.tap(sendBtn.centerX, sendBtn.centerY);
-    await abortableSleep(1000, this.signal);
-
-    // 5. 校验:输入面板消失(或输入框清空)视为发送成功
-    const { nodes: ns3 } = await this.dumpRoom();
-    const stillOpen = findById(ns3, 'et_screen_message')[0];
-    const cleared = !stillOpen || stillOpen.text === '' || stillOpen.text === '说点什么吧~';
-    return { ok: cleared, typed: true };
-  }
-
-  // ===================================================================
-  // 功能 3:自动打call
-  // ===================================================================
-  /**
-   * 循环发送打call表情。
-   * 房间内的打call通常是:点"表情"→ 选择打call表情。
-   * 找不到时返回不支持,不额外发送文字。
-   */
-  async startAutoCall({ emoji = '打call', delayMin = 3, delayMax = 6, onEvent, signal = this.signal } = {}) {
-    const log = (l, m) => this.log(l, m);
-    let sent = 0;
-    let stopped = false;
-    const controller = new AbortController();
-    const abort=()=>controller.abort();
-    signal?.addEventListener('abort',abort,{once:true});
-    if(signal?.aborted) controller.abort();
-    this.setSignal(controller.signal);
-
-    const loop = (async () => {
-      while (!stopped) {
-        try {
-          const ok = await this._sendCallOnce(emoji);
-          if (stopped) break;
-          if (ok) { sent++; log('ok', `已发送 ${emoji} (第 ${sent} 次)`); }
-          else log('fail', `发送 ${emoji} 失败`);
-          onEvent?.({ type: 'call', sent, ok });
-        } catch (e) {
-          if (isAbortError(e)) break;
-          log('fail', '打call异常: ' + e.message.slice(0, 70));
-        }
-        if (stopped) break;
-        const ms = delayMin * 1000 + Math.floor(Math.random() * (delayMax - delayMin) * 1000);
-        try { await abortableSleep(ms, controller.signal); } catch(e) { if(isAbortError(e)) break; throw e; }
-      }
-    })();
-
-    return {
-      stop: async () => { stopped = true; controller.abort(); await loop; signal?.removeEventListener('abort',abort); return { sent }; },
-      getStatus: () => ({ running: !stopped, sent }),
-    };
-  }
-
-  async _sendCallOnce(emoji) {
-    // 1. 优先:房间里若有直接的"打call"按钮
-    const { nodes } = await this.dumpRoom();
-    const direct = findByText(nodes, emoji).find(n => n.clickable);
-    if (direct) {
-      await this.adb.tap(direct.centerX, direct.centerY);
-      await abortableSleep(800, this.signal);
-      return true;
-    }
-    // 2. 打开表情面板(若已开着则跳过点击,避免误关)
-    const emojiBtn = findById(nodes, ROOM_IDS.expression)[0];
-    let panelNodes = null;
-    if (findById(nodes, 'rv_expression')[0]) {
-      panelNodes = nodes;                       // 面板已开
-    } else if (emojiBtn) {
-      await this.adb.tap(emojiBtn.centerX, emojiBtn.centerY);
-      await abortableSleep(1400, this.signal);
-      const { nodes: ns2 } = await this.dumpRoom();
-      panelNodes = findById(ns2, 'rv_expression')[0] ? ns2 : null;
-    }
-    if (panelNodes) {
-      const item = findByText(panelNodes, emoji).find(n => n.clickable) ||
-                   findByText(panelNodes, emoji)[0];
-      if (item) {
-        await this.adb.tap(item.centerX, item.centerY);
-        await abortableSleep(1200, this.signal);
-        // 实测:点击表情项后面板会【自动关闭】,且仍停留在房间页。
-        // 千万不要用 adb.back() 关面板 —— 那会直接退出整个房间!
-        const { nodes: ns3 } = await this.dumpRoom();
-        if (findById(ns3, 'rv_expression')[0]) {
-          // 面板意外未关:点公屏空白区关闭(仍不能用 back)
-          await this.adb.tap(300, 1050);
-          await abortableSleep(600, this.signal);
-        }
-        return true;
-      }
-    }
-    // 没找到目标表情:点公屏关闭面板后返回失败
-    const { nodes: ns4 } = await this.dumpRoom();
-    if (findById(ns4, 'rv_expression')[0]) {
-      await this.adb.tap(300, 1050);
-      await abortableSleep(500, this.signal);
-    }
-    return false;
-  }
-}
-
-// ===== 从房间控件树中提取"新用户进入"事件 =====
-// 房间公屏里"XX 来了/进入房间"这类消息的昵称,视为新用户
-export function extractJoinEvents(nodes) {
-  const events = new Set();
-  const contents = findById(nodes, ROOM_IDS.msgContent).concat(findById(nodes,ROOM_IDS.msgContentAlt));
-  for (const c of contents) {
-    const t = c.text || '';
-    if (/来了|进入房间/.test(t)) {
-      // 取同行的昵称
-      const line = nodes.filter(n => Math.abs(n.centerY - c.centerY) < 45);
-      const nick = line.find(n => n.shortId === ROOM_IDS.msgNickname || n.shortId === ROOM_IDS.msgNicknameAlt);
-      if (nick && nick.text) events.add(nick.text);
-      else if (t.length < 30) events.add(t);
-    }
-  }
-  return [...events];
 }
 
 export default AndroidDriver;

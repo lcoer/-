@@ -10,6 +10,7 @@
     "test": "node scripts/test.cjs",
     "check": "node scripts/check.cjs",
     "diagnose": "node scripts/diagnose.mjs",
+    "classify": "node scripts/classify-users.cjs",
     "smoke": "node scripts/smoke.cjs",
     "dist": "node scripts/build.cjs"
   },

@@ -34,8 +34,9 @@ function registerSystemIpc(ctx) {
   handle('system:getInfo', async () => {
     const health = await clientManager.getHealth();
     const recoveryRequired = !!dataStore.getStatus().recoveryRequired;
+    const collectionRecoveryRequired = !!dataStore.getStatus().collectionRecoveryRequired;
     return { ...health, executionMode: mode(), demoMode: mode() === 'demo', version: config.appVersion, platform: process.platform,
-      capabilities: { text: true, image: false, voice: false, requiresBridge: true }, deviceOwner: taskRunner.getStatus().deviceOwner, recoveryRequired };
+      capabilities: { text: true, image: false, voice: false, requiresBridge: true }, deviceOwner: taskRunner.getStatus().deviceOwner, recoveryRequired, collectionRecoveryRequired };
   });
   handle('system:connectEmulator', connect);
   handle('system:openClient', connect);
@@ -114,7 +115,11 @@ function registerSystemIpc(ctx) {
     if (key === 'settings')
       return taskRunner.withDeviceOperation('changeMode', async () => {
         const previous = dataStore.getConfig('settings') || { executionMode: 'android' };
-        dataStore.setConfig(key, value);
+        // Preserve the device identity maintained by the main process and the
+        // account UID when older clients only submit an execution mode.
+        const next = { ...previous, executionMode: value.executionMode };
+        if (Object.hasOwn(value, 'senderAccountUid')) next.senderAccountUid = value.senderAccountUid;
+        dataStore.setConfig(key, next);
         try {
           dataStore.setSource(value.executionMode === 'demo' ? 'demo' : 'room');
         }

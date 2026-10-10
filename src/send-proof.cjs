@@ -74,6 +74,28 @@ function isDefinitiveSendRejection(result, targetUid) {
     && Number.isInteger(p.beforeMessageCount) && p.beforeMessageCount >= 0 && p.afterMessageCount === p.beforeMessageCount + 1
     && contains(p.rowBounds, p.messageBounds) && contains(p.rowBounds, p.hintBounds) && p.hintBounds.y >= p.messageBounds.y2 && p.hintBounds.y - p.messageBounds.y2 <= 160);
 }
+function proveOutgoingConfirmation(before, after, text) {
+  const oldTexts = before.filter(n => n.shortId === 'rc_text');
+  const texts = after.filter(n => n.shortId === 'rc_text');
+  if (texts.length !== oldTexts.length + 1 || oldTexts.some((n, i) => n.text !== texts[i].text || n.packageName !== texts[i].packageName)) return null;
+  const message = texts.at(-1);
+  if (message.text !== text || message.packageName !== APP || !rect(message)) return null;
+  const lists = after.filter(n => n.shortId === 'rc_message_list' && n.packageName === APP && contains(n, message));
+  if (lists.length !== 1) return null;
+  const list = lists[0];
+  const portraits = after.filter(n => n.shortId === 'rc_right_portrait' && n.packageName === APP && contains(list, n) && n.x >= message.x2 && n.y < message.y2 && n.y2 > message.y);
+  if (portraits.length !== 1) return null;
+  const portrait = portraits[0];
+  const rows = after.filter(n => n.className === 'android.widget.LinearLayout' && n.packageName === APP && contains(list, n) && contains(n, message) && contains(n, portrait));
+  rows.sort((a, b) => (a.x2 - a.x) * (a.y2 - a.y) - (b.x2 - b.x) * (b.y2 - b.y));
+  const row = rows[0];
+  if (!row || texts.filter(n => contains(row, n)).length !== 1) return null;
+  if (after.some(n => n.shortId === 'rc_left_portrait' && contains(row, n))) return null;
+  if (after.some(n => contains(row, n) && (/error|failed|sending|progress|pending/i.test(n.shortId || '') || n.className === 'android.widget.ProgressBar'))) return null;
+  if (hasUncertainSendFailure(before, after, text)) return null;
+  return { kind: 'new_outgoing_row_confirmation', text, beforeMessageCount: oldTexts.length, afterMessageCount: texts.length, packageName: APP, messageBounds: bounds(message), rowBounds: bounds(row), portraitBounds: bounds(portrait) };
+}
 exports.proveSendRejection = proveSendRejection;
 exports.isDefinitiveSendRejection = isDefinitiveSendRejection;
 exports.hasUncertainSendFailure = hasUncertainSendFailure;
+exports.proveOutgoingConfirmation = proveOutgoingConfirmation;

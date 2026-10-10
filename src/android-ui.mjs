@@ -6,7 +6,7 @@
 import { findById, findByText } from './adb-client.mjs';
 
 import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
-import { proveSendRejection, hasUncertainSendFailure } from './send-proof.cjs';
+import { proveSendRejection, hasUncertainSendFailure, proveOutgoingConfirmation } from './send-proof.cjs';
 
 // 各页面特征控件(用于识别当前在哪个页面)
 const PAGE_MARKERS = {
@@ -189,13 +189,27 @@ export function lastMessage(nodes) {
 
 // ===== 聊天窗口:输入并发送(核心) =====
 // 支持中文(自动走 ADBKeyboard)
-export async function typeAndSend(adb, text, { onLog = () => {}, onBeforeSend, sendTimeout = 6000, verifyGapMs = 1200, signal = adb.signal, dump, setText } = {}) {
+export async function typeAndSend(adb, text, { onLog = () => {}, onBeforeSend, sendTimeout = 6000, verifyGapMs = 1200, signal = adb.signal, dump, setText, clickSend, requireOutgoingProof = false, outgoingStableMs = 1200, inputVerifyMs = 1500 } = {}) {
   let clicked = false, stage = 'validate', originalIme = null;
   const evidence = {};
   const result = (outcome, reason) => ({ ok: outcome === 'confirmed_ui', status: outcome, outcome, stage, reason, evidence, typed: evidence.inputMatched === true });
   if (!String(text || '').trim()) return result('failed', 'EMPTY_TEXT');
   const pause = ms => abortableSleep(ms, signal);
   const read = dump || (()=>adb.dumpUi());
+  // ACTION_SET_TEXT can acknowledge before Accessibility's cached tree is
+  // refreshed. Observe that transition without repeating the input mutation.
+  const verifyInput = async predicate => {
+    const timeout = Math.min(3000, Math.max(0, Number.isFinite(inputVerifyMs) ? inputVerifyMs : 1500));
+    const deadline = Date.now() + timeout;
+    while (true) {
+      throwIfAborted(signal);
+      const snapshot = await read();
+      throwIfAborted(signal);
+      const field = findById(snapshot.nodes, 'input_message')[0];
+      if ((field && predicate(field.text)) || Date.now() >= deadline) return snapshot.nodes;
+      await pause(Math.min(120, Math.max(1, deadline - Date.now())));
+    }
+  };
   try {
     throwIfAborted(signal);
     let { nodes } = await read();
@@ -214,7 +228,8 @@ export async function typeAndSend(adb, text, { onLog = () => {}, onBeforeSend, s
       await pause(400);
     }
     throwIfAborted(signal);
-    const empty = findById((await read()).nodes, 'input_message')[0];
+    const emptyNodes = setText ? await verifyInput(value => ['', '请输入消息...'].includes(value)) : (await read()).nodes;
+    const empty = findById(emptyNodes, 'input_message')[0];
     if (!empty || !['', '请输入消息...'].includes(empty.text)) return result('failed', 'INPUT_NOT_CLEARED');
     if (setText) {
       const typed = await setText(text);
@@ -224,7 +239,7 @@ export async function typeAndSend(adb, text, { onLog = () => {}, onBeforeSend, s
       await pause(verifyGapMs);
     }
     throwIfAborted(signal);
-    const before = (await read()).nodes;
+    const before = setText ? await verifyInput(value => value === text) : (await read()).nodes;
     evidence.inputMatched = findById(before, 'input_message')[0]?.text === text;
     if (!evidence.inputMatched) return result('failed', 'INPUT_MISMATCH');
     const beforeCount = findById(before, 'rc_text').filter(n => n.text === text).length;
@@ -244,12 +259,20 @@ export async function typeAndSend(adb, text, { onLog = () => {}, onBeforeSend, s
     const finalCount = evidence.beforeExactCount;
     throwIfAborted(signal);
     stage = 'send'; clicked = true;
-    await adb.tap(finalSend.centerX, finalSend.centerY);
+    if (clickSend) {
+      const dispatch = await clickSend();
+      if (dispatch?.ok !== true) return result('unconfirmed', dispatch?.error || 'SEND_CLICK_UNCERTAIN');
+    } else {
+      await adb.tap(finalSend.centerX, finalSend.centerY);
+    }
     stage = 'confirm';
     let uncertaintyReason = 'CONFIRMATION_TIMEOUT';
     const start = Date.now();
-    while (Date.now() - start < sendTimeout) {
-      await pause(Math.min(800, Math.max(1, sendTimeout)));
+    const confirmationTimeout = requireOutgoingProof ? Math.min(6000, sendTimeout) : sendTimeout;
+    let stableSince = null, stableSnapshots = 0;
+    const stableRequired = Math.max(1200, Number.isFinite(outgoingStableMs) ? outgoingStableMs : 1200);
+    while (Date.now() - start < confirmationTimeout) {
+      await pause(Math.min(800, Math.max(1, confirmationTimeout - (Date.now() - start))));
       nodes = (await read()).nodes;
       throwIfAborted(signal);
       const now = findById(nodes, 'input_message')[0];
@@ -262,13 +285,24 @@ export async function typeAndSend(adb, text, { onLog = () => {}, onBeforeSend, s
         return result('failed', rejection.reason);
       }
       if (hasUncertainSendFailure(final, nodes, text)) {
+        stableSince = null; stableSnapshots = 0;
         // A slow refresh can still show just the old failed history. Wait
         // for a conclusive new row, without clicking send again.
         uncertaintyReason = 'SEND_FAILURE_INDICATOR';
         if (evidence.afterExactCount > finalCount) return result('unconfirmed', uncertaintyReason);
         continue;
       }
-      if (evidence.inputCleared && evidence.afterExactCount > finalCount) return result('confirmed_ui', 'NEW_EXACT_TEXT_VISIBLE');
+      if (requireOutgoingProof) {
+        const proof = evidence.inputCleared && proveOutgoingConfirmation(final, nodes, text);
+        if (!proof) { stableSince = null; stableSnapshots = 0; continue; }
+        stableSince ??= Date.now();
+        stableSnapshots++;
+        const stableMs = Date.now() - stableSince;
+        if (stableSnapshots >= 2 && stableMs >= stableRequired) {
+          evidence.outgoingConfirmation = { ...proof, stableMs, snapshots: stableSnapshots };
+          return result('confirmed_ui', 'NEW_OUTGOING_TEXT_STABLE');
+        }
+      } else if (evidence.inputCleared && evidence.afterExactCount > finalCount) return result('confirmed_ui', 'NEW_EXACT_TEXT_VISIBLE');
     }
     return result('unconfirmed', uncertaintyReason);
   } catch (e) {

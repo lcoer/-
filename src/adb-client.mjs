@@ -294,6 +294,11 @@ export class AdbClient {
   }
 
   // 截图(PNG 文件路径)
+  async screenshotBuffer({signal=this.signal,timeout=1500}={}) {
+    const serial=await this.serial({signal});throwIfAborted(signal);
+    const {stdout}=await execFileAsync(this.cfg.adbPath,['-s',serial,'exec-out','screencap','-p'],{signal,timeout,encoding:null,maxBuffer:20*1024*1024,windowsHide:true});
+    throwIfAborted(signal);return stdout;
+  }
   async screenshot({ tmpName = `shot-${Date.now()}.png` } = {}) {
     const serial = await this.serial();
     const remote = `/sdcard/${tmpName}`;

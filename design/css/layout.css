@@ -161,5 +161,9 @@ body { display: flex; flex-direction: column; }
   padding: 12px 0; border-bottom: 1px solid var(--outline-soft);
 }
 .settings-row:last-of-type { border-bottom: none; }
-.settings-label { font-size: 13px; color: var(--tertiary-c); }
+.settings-label { font-size: 13px; color: var(--tertiary-c); flex-shrink: 0; white-space: nowrap; }
+.settings-row > select { width: 60%; }
 .settings-value { font-size: 13px; color: var(--on-bg); font-weight: 500; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-row:has(#senderAccountUid) { gap: 12px; flex-wrap: wrap; }
+#senderAccountUid { flex: 1; min-width: 220px; padding: 9px 12px; border: 1px solid var(--outline-soft); border-radius: 8px; background: var(--bg); color: var(--on-bg); }
+#senderAccountUid:focus { border-color: var(--primary-c); }

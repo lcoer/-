@@ -158,9 +158,6 @@ module.exports = {
   taskRunner: {
     mediaGapMinMs: 1000,         // 文字→图片→语音之间的随机间隔下限
     mediaGapRangeMs: 2000,       // 随机间隔范围(1-3 秒)
-    welcomePollIntervalMs: 3000, // 欢迎任务状态轮询间隔
-    callDelayMinMs: 3000,        // 打call默认最小间隔
-    callDelayMaxMs: 5000,        // 打call默认最大间隔
   },
 
   // ===== 数据通道(演示模式下生成模拟数据) =====

@@ -61,7 +61,7 @@
 | C2 | `src/async-control.mjs`、`tests/async-control.test.mjs` | 可取消 sleep/wait；顺序轮询；统一 AbortError | 等待可中断；排队取消 promise 收敛；轮询最长并发为 1 |
 | C3 | `electron/services/task-runner.js` | private/welcome/call/collect/resolve 全部注册占用和状态；就绪后才发布 driver | 六种冲突双向检查；初始化失败释放；并发初始化去重 |
 | C4 | `src/adb-client.mjs`、`src/android-ui.mjs`、`src/android-driver.mjs` | signal 到子进程与每次等待、读树、点击；操作前后检查当前 runId | 停止发生在导航/输入/发送前均无后续动作；子进程中断可见 |
-| C5 | `src/room-collector.mjs`、`src/android-driver.mjs` | 采集/欢迎从异步 interval 改顺序循环；stop 等待本轮收尾 | 慢 dump 不重入；停止后不入库/欢迎；重启不接收旧回调 |
+| C5 | `src/room-collector.mjs`、`src/android-driver.mjs` | 采集从异步 interval 改顺序循环；stop 等待本轮收尾 | 慢 dump 不重入；停止后不入库；重启不接收旧回调 |
 | C6 | `electron/ipc/system-ipc.js`、`electron/services/client-manager.js` | 安装、重连、改路径纳入占用；指定 adb 真正重建连接 | 活动任务时拒绝改设备；选新路径不返回旧缓存连接 |
 | C7 | `electron/main.js`、`electron/services/data-store.js`、`electron/ipc/task-ipc.js` | shutdown await、清所有定时器、采集和解析；状态事件推送 | 应用退出不遗留任务；starting/stopping 不被显示为 stopped |
 
@@ -146,8 +146,6 @@ npm run dist
 1. 只读探测搜索 UID → 结果 → 主页 → 私聊路径，记录目标 App 版本和合成后的选择器样本。
 2. 根据实测新增 `src/user-navigation.mjs`；按精确 UID 定位，进入主页二次核验，找不到返回结构化原因。
 3. 昵称解析遍历完整会话列表，按目标 UID 提前结束，支持取消；从结果回填时保留未匹配的原昵称。
-4. 固定房间会话内开放采集/欢迎/打call，通过原子流程队列协同；严格限制后台积压。
-5. 欢迎策略依据真实入口实现；重复进入按时间窗口处理，备用文本由用户显式选择；打call 找不到不静默替换为公屏文字。
 
 ## 后续候选
 

@@ -16,3 +16,15 @@ test('collection preferences require a bounded known scope',()=>{
   assert.equal(validateConfigChange('collection',{scope:'multi',maxRooms:12,maxPages:6}).ok,true);
   assert.equal(validateConfigChange('collection',{scope:'multi',maxRooms:999,maxPages:6}).ok,false);
 });
+
+test('sender account UID is optional for settings but must be numeric when supplied',()=>{
+  assert.equal(validateConfigChange('settings',{executionMode:'android',senderAccountUid:'12345'}).ok,true);
+  assert.equal(validateConfigChange('settings',{executionMode:'demo',senderAccountUid:''}).ok,true);
+  for (const uid of ['somebody','123 45',12345,'1'.repeat(33)])
+    assert.equal(validateConfigChange('settings',{executionMode:'android',senderAccountUid:uid}).ok,false);
+});
+
+test('saving copywriting rejects oversized Unicode text before persisting unusable templates',()=>{
+ assert.equal(validateConfigChange('copywriting',{contents:['😀'.repeat(2001)],mode:'select'}).ok,false);
+ assert.equal(validateConfigChange('copywriting',{contents:['😀'.repeat(2000)],mode:'select'}).ok,true);
+});

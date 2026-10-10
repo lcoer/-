@@ -69,22 +69,21 @@ const GuestView = (function () {
     document.getElementById('guestNavCount').textContent = fmtNum(state.records.length);
   }
 
+  let recordsRevision = 0;
   async function load() {
-    const res = await api.portal.getRecords(state.date, state.seg, state.page, 24, state.kw);
-    if (!res || !res.ok) return;
-    state.records = res.records || [];
-    state.pages = res.pages || 1;
-    state.page = res.page || 1;
-    render();
-  }
-
-  function newRecordCard(r) {
-    // 实时流插入:(仅第一页且筛选匹配时置顶)
-    if (state.page !== 1) return;
-    if (state.seg !== 'all' && state.seg !== r.sex) return;
-    state.records.unshift(r);
-    if (state.records.length > 48) state.records.pop();
-    render();
+    const revision = ++recordsRevision;
+    try {
+      const res = await api.portal.getRecords(state.date, state.seg, state.page, 24, state.kw);
+      if (revision !== recordsRevision) return;
+      if (!res || !res.ok) throw Error(res?.reason || '采集记录加载失败');
+      state.records = res.records || [];
+      state.pages = res.pages || 1;
+      state.page = res.page || 1;
+      render();
+      document.getElementById('guestNavCount').textContent = fmtNum(res.total ?? state.records.length);
+    } catch (error) {
+      if (revision === recordsRevision) toast(error.message, 'error');
+    }
   }
 
   async function init() {
@@ -139,7 +138,7 @@ const GuestView = (function () {
   }
 
   function onStream(ev) {
-    if (ev.type === 'record') newRecordCard(ev.payload);
+    if (ev.type === 'record') refreshRecords();
     if (ev.type === 'batch') {
       // 真实采集批量入库 → 整页刷新
       if (ev.payload.added || ev.payload.updated) load();
@@ -157,6 +156,8 @@ const GuestView = (function () {
   const liveBox = document.getElementById('portalLiveBox');
   const liveText = document.getElementById('portalLiveText');
   const refreshStats = debounce(updateStats, 100);
+  // The store owns date filtering, uniqueness and page bounds, including live updates.
+  const refreshRecords = debounce(load, 100);
   let latestCollectStatus = { running: false, state: 'stopped' };
   let deviceOwner = null, statusRevision = 0;
   let backendStatusRevision = -1;
@@ -272,8 +273,10 @@ const GuestView = (function () {
       if (r && r.ok) {
         await load();
         await updateStats();
-        alert(`已清除 ${r.removed} 条虚拟数据,当前剩余 ${r.kept} 条真实数据。`);
-      }
+        alert(`已清除 ${r.removed} 条虚拟数据,当前剩余 ${r.kept} 条真实数据。\n执行模式保持不变；演示模式会继续生成演示数据，退出演示请在设置页切换。`);
+      } else toast(r?.reason || '清除演示数据失败', 'error');
+    } catch (error) {
+      toast(`清除演示数据失败: ${error.message}`, 'error');
     } finally {
       clearBtn.disabled = false;
     }

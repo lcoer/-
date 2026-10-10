@@ -54,6 +54,14 @@ test('matched room-card evidence is published as a UID, not a nickname-derived i
   assert.equal(updates.length,2);assert.equal(updates[1][0].uid,'12345');
   assert.equal(updates[1][0].evidence,'matched_room_user_card');
 });
+
+test('collection enriches an already verified public UID whose gender is still unknown',async()=>{
+ const meta={room:'room',roomCode:'1001',nodes:nodes('12345')};let calls=0;const updates=[];
+ const collector=new RoomCollector({setSignal(){},bridge:{}},{scope:'single',navigator:{ensureRoom:async()=>meta,getStatus:()=>({})},scanMembers:false,onUsers:users=>{updates.push(users);return {added:0};},userResolver:async(_driver,users,opts)=>{
+  calls++;assert.equal(users[0].uidReal,true);await opts.onUser({...users[0],sex:'male',resolvedFrom:users[0].uid});return {profilesRead:1,reason:'complete'};
+ }});
+ collector.stopped=false;await collector._collectOnce();assert.equal(calls,1);assert.equal(updates.at(-1)[0].sex,'male');
+});
 test('pre-cancelled collection does not report running or perform navigation',async()=>{
   const collector=new RoomCollector({setSignal(){}},{scope:'multi'});
   await assert.rejects(collector.start({signal:AbortSignal.abort()}),{name:'AbortError'});

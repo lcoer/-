@@ -1,8 +1,9 @@
-// js/task-console.js - 控制台(三任务控制 + 实时日志)
+// js/task-console.js - Private task controls and live log
 const TaskConsole = (function () {
   const api = window.api;
   const LOG_MAX = 400;
   let latestStatusRevision = -1;
+  let privateStartPending = false, latestTaskStatus = null;
 
   const logList = document.getElementById('taskLogList');
 
@@ -13,7 +14,7 @@ const TaskConsole = (function () {
     const line = document.createElement('div');
     line.className = `log-line ${entry.level}`;
     const t = new Date(entry.time).toLocaleTimeString('zh-CN');
-    const taskName = { system: '系统', private: '私聊', welcome: '欢迎', call: '打call' }[entry.task] || entry.task;
+    const taskName = { system: '系统', private: '私聊' }[entry.task] || entry.task;
     line.innerHTML = `<span class="log-time">${t}</span><span class="log-task ${entry.task}">[${taskName}]</span><span class="log-msg">${escapeHtml(entry.msg)}</span>`;
     logList.appendChild(line);
     while (logList.children.length > LOG_MAX) logList.removeChild(logList.firstChild);
@@ -24,20 +25,20 @@ const TaskConsole = (function () {
     const running = !!task.running;
     const map = {
       private: { dot: 'taskPrivateDot', text: 'taskPrivateText', on: '运行中', off: '已停止' },
-      welcome: { dot: 'taskWelcomeDot', on: '运行中', off: '已停止' },
-      call: { dot: 'taskCallDot', on: '运行中', off: '已停止' },
     }[name];
     if (!map) return;
     const dot = document.getElementById(map.dot);
     dot.classList.toggle('running', running);
     dot.classList.toggle('stopped', !running);
-    const stateLabel = { starting: '启动中', running: '运行中', stopping: '停止中', stopped: '已停止', failed: '失败' }[task.state] || map.off;
+    const stateLabel = name === 'private' && task.state === 'running' && task.stats?.phase === 'waiting'
+      ? `等待间隔 ${Math.ceil((task.stats.waitMs || 0) / 1000)} 秒 · 下一目标 ${task.stats.nextTargetUid || ''}`
+      : { starting: '启动中', running: '运行中', stopping: '停止中', stopped: '已停止', failed: '失败' }[task.state] || map.off;
     const label = document.getElementById(map.text || `task${cap(name)}Text`);
     if (label) label.textContent = stateLabel;
     // 按钮状态
     const startBtn = document.getElementById(`task${cap(name)}Start`);
     const stopBtn = document.getElementById(`task${cap(name)}Stop`);
-    if (startBtn) startBtn.disabled = running || !!owner;
+    if (startBtn) startBtn.disabled = running || !!owner || (name === 'private' && privateStartPending);
     if (stopBtn) stopBtn.disabled = !running || task.state === 'stopping';
   }
 
@@ -48,6 +49,7 @@ const TaskConsole = (function () {
       if (status.statusRevision < latestStatusRevision) return;
       latestStatusRevision = status.statusRevision;
     }
+    latestTaskStatus = status;
     const p = status.private?.stats || {};
     document.getElementById('taskPrivateSent').textContent = p.sent || 0;
     document.getElementById('taskPrivateOk').textContent = p.ok || 0;
@@ -59,32 +61,26 @@ const TaskConsole = (function () {
     document.getElementById('taskPrivateWeek').textContent = p.week || 0;
     document.getElementById('taskPrivateMonth').textContent = p.month || 0;
 
-    const w = status.welcome?.stats || {};
-    document.getElementById('taskWelcomeClicked').textContent = status.welcome?.mode === 'demo' ? `模拟 ${w.simulated || 0}` : w.clicked || 0;
-    document.getElementById('taskWelcomeSkipped').textContent = w.skipped || 0;
-
-    const c = status.call?.stats || {};
-    document.getElementById('taskCallSent').textContent = status.call?.mode === 'demo' ? `模拟 ${c.simulated || 0}` : c.sent || 0;
-
     setStatus('private', status.private, status.deviceOwner);
-    setStatus('welcome', status.welcome, status.deviceOwner);
-    setStatus('call', status.call, status.deviceOwner);
     document.getElementById('taskOwner').textContent = status.deviceOwner ? `设备当前由 ${status.deviceOwner.owner} 占用` : '设备空闲；任务之间互斥';
   }
 
   // ===== 私聊启动配置组装 =====
   async function buildPrivateConfig() {
-    const rules = RulesView.readForm();
+    const rulesSnapshot = JSON.stringify(RulesView.readForm());
+    const rules = JSON.parse(rulesSnapshot);
     const copy = await Copywriting.flush();
     const blacklist = await api.config.get('blacklist');
     const settings = await api.config.get('settings') || {};
     // 目标列表按 UID 搜索；昵称用于展示，不作为发送身份依据。
     const executionMode = settings.executionMode === 'demo' ? 'demo' : 'android';
     const targets = await RulesView.getTargets({ demo: executionMode === 'demo' });
+    if (rulesSnapshot !== JSON.stringify(RulesView.readForm())) throw Error('目标规则在准备期间发生变化，请重新确认并启动');
 
     return {
       targets,
       executionMode,
+      senderAccountUid: settings.senderAccountUid || '',
       targetIds: targets.map(t => t.uid),
       contents: copy.contents || [],
       mode: copy.mode || 'random',
@@ -102,50 +98,38 @@ const TaskConsole = (function () {
   async function init() {
     // 私聊
     document.getElementById('taskPrivateStart').addEventListener('click', async () => {
+      if (privateStartPending) return;
+      privateStartPending = true;
+      document.getElementById('taskPrivateStart').disabled = true;
       try {
         const config = await buildPrivateConfig();
         if (config.targets.length === 0) { toast('没有可发送的目标,请先在规则设定中选择来源', 'error'); return; }
         const { validatePrivateConfig } = await import('/engine/task-policy.mjs');
         const checked = validatePrivateConfig(config);
         if (!checked.ok) { toast(checked.reason, 'error'); return; }
+        if (config.executionMode === 'android' && !/^\d{1,32}$/.test(config.senderAccountUid)) {
+          toast('请先在设置页填写并核对当前登录的发送账号 UID', 'error'); return;
+        }
         const label = config.executionMode === 'demo' ? '演示模拟（不发送）' : '真实文字私聊（先核对对方 UID）';
         const copyPreview = config.mode === 'select'
           ? `使用文案：${config.contents[config.selectedIndex]}`
           : `每位用户随机选择以下 ${config.contents.length} 条文案中的一条：\n${config.contents.map((text, i) => `${i + 1}. ${text}`).join('\n')}`;
-        const ok = await Dialog.confirm(`${label}，按 UID 搜索共 ${checked.config.targets.length} 个目标。\n${copyPreview}\n待确认结果会停止本批次，确认开始？`, '启动自动私聊');
+        const senderPreview = config.executionMode === 'android' ? `\n发送账号 UID：${config.senderAccountUid}。请确认与模拟器当前登录账号一致。` : '';
+        const ok = await Dialog.confirm(`${label}${senderPreview}\n按 UID 搜索共 ${checked.config.targets.length} 个目标。\n${copyPreview}\n待确认结果会停止本批次，确认开始？`, '启动自动私聊');
         if (!ok) return;
         const res = await api.task.start('private', config);
         if (res.ok) toast('自动私聊已启动', 'ok');
         else toast(`启动失败: ${res.reason}`, 'error');
       } catch (e) {
         toast(`启动失败: ${e.message}`, 'error');
+      } finally {
+        privateStartPending = false;
+        if (latestTaskStatus) updateStats(latestTaskStatus);
       }
     });
     document.getElementById('taskPrivateStop').addEventListener('click', async () => {
       const res = await api.task.stop('private');
       toast(res.ok ? '自动私聊已停止' : res.reason, res.ok ? 'info' : 'error');
-    });
-
-    // 欢迎
-    document.getElementById('taskWelcomeStart').addEventListener('click', async () => {
-      const settings = await api.config.get('settings') || {};
-      const res = await api.task.start('welcome', { executionMode: settings.executionMode || 'android' });
-      toast(res.ok ? '自动欢迎已启动' : `启动失败: ${res.reason}`, res.ok ? 'ok' : 'error');
-    });
-    document.getElementById('taskWelcomeStop').addEventListener('click', async () => {
-      await api.task.stop('welcome');
-      toast('自动欢迎已停止', 'info');
-    });
-
-    // 打call
-    document.getElementById('taskCallStart').addEventListener('click', async () => {
-      const settings = await api.config.get('settings') || {};
-      const res = await api.task.start('call', { emoji: '打call', delayMin: 3, delayMax: 5, executionMode: settings.executionMode || 'android' });
-      toast(res.ok ? '自动打call已启动' : `启动失败: ${res.reason}`, res.ok ? 'ok' : 'error');
-    });
-    document.getElementById('taskCallStop').addEventListener('click', async () => {
-      await api.task.stop('call');
-      toast('自动打call已停止', 'info');
     });
 
     document.getElementById('taskLogClear').addEventListener('click', () => {
@@ -155,14 +139,17 @@ const TaskConsole = (function () {
       const res = await api.task.getPending();
       if (!res?.results?.length) { toast('没有待确认记录', 'info'); return; }
       for (const record of res.results) {
-        const sent = await Dialog.confirm(`请先在模拟器中核对 UID ${record.targetUid} 的消息。若已找到本次消息，点确认；未找到或不确定请取消。`, '人工核对：已发送');
+        let device = record.senderDeviceKey || '未知';
+        try { const identity = JSON.parse(device); if (Array.isArray(identity) && typeof identity[1] === 'string') device = identity[1]; } catch (_) {}
+        const sender = record.senderAccountUid ? `发送账号 UID：${record.senderAccountUid}；设备：${device}。` : '此记录来自旧版，发送账号和设备未归属，请核对原账号。';
+        const sent = await Dialog.confirm(`${sender}\n请先在对应模拟器账号中核对 UID ${record.targetUid} 的消息。若已找到本次消息，点确认；未找到或不确定请取消。`, '人工核对：已发送');
         let resolution = sent ? 'confirmed' : null;
         if (!sent) {
           const notSent = await Dialog.confirm(`只有确定本次消息没有发送，才可解除 UID ${record.targetUid} 的重发限制。不确定请取消，保留待确认。`, '人工核对：确定未发送');
           if (notSent) resolution = 'not_sent';
         }
         if (resolution) {
-          const r = await api.task.resolvePending({ targetUid: record.targetUid, runId: record.runId, resolution });
+          const r = await api.task.resolvePending({ machineCode: record.machineCode, targetUid: record.targetUid, runId: record.runId, resolution });
           toast(r?.ok ? '核对结果已保存' : (r?.reason || '保存失败'), r?.ok ? 'ok' : 'error');
         }
       }

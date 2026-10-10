@@ -358,42 +358,6 @@
         <p class="field-hint">界面确认不等于服务器送达。待确认目标不会自动重发，旧版统计保留但不计入这里。</p>
         <button class="save-btn ghost" id="pendingReviewBtn">核对待确认记录</button>
 
-        <div class="task-grid">
-          <div class="task-card" data-task="welcome">
-            <div class="task-card-header">
-              <div class="task-card-title"><span class="material-symbols-outlined">waving_hand</span><h3>自动欢迎</h3></div>
-              <span class="status-dot stopped" id="taskWelcomeDot"></span>
-              <span id="taskWelcomeText">已停止</span>
-            </div>
-            <div class="task-card-desc">检测进入事件并尝试可用欢迎入口；入口不存在则跳过</div>
-            <div class="task-card-stats">
-              <div class="task-stat"><span class="task-stat-label">已点击</span><span class="task-stat-value" id="taskWelcomeClicked">0</span></div>
-              <div class="task-stat"><span class="task-stat-label">跳过</span><span class="task-stat-value" id="taskWelcomeSkipped">0</span></div>
-            </div>
-            <div class="task-card-actions">
-              <button class="task-btn task-btn-start" id="taskWelcomeStart"><span class="material-symbols-outlined">play_arrow</span>启动</button>
-              <button class="task-btn task-btn-stop" id="taskWelcomeStop" disabled><span class="material-symbols-outlined">pause</span>暂停</button>
-            </div>
-          </div>
-
-          <div class="task-card" data-task="call">
-            <div class="task-card-header">
-              <div class="task-card-title"><span class="material-symbols-outlined">bolt</span><h3>自动打call</h3></div>
-              <span class="status-dot stopped" id="taskCallDot"></span>
-              <span id="taskCallText">已停止</span>
-            </div>
-            <div class="task-card-desc">房间内自动发送表情(打call/666 等)</div>
-            <div class="task-card-stats">
-              <div class="task-stat"><span class="task-stat-label">已执行动作</span><span class="task-stat-value" id="taskCallSent">0</span></div>
-              <div class="task-stat"><span class="task-stat-label">表情</span><span class="task-stat-value" id="taskCallEmoji">打call</span></div>
-            </div>
-            <div class="task-card-actions">
-              <button class="task-btn task-btn-start" id="taskCallStart"><span class="material-symbols-outlined">play_arrow</span>启动</button>
-              <button class="task-btn task-btn-stop" id="taskCallStop" disabled><span class="material-symbols-outlined">pause</span>暂停</button>
-            </div>
-          </div>
-        </div>
-
         <div class="task-log-section">
           <div class="task-log-header">
             <h3>实时日志</h3>
@@ -438,7 +402,7 @@
             </div>
             <div class="copywriting-list" id="copywritingList"></div>
             <div class="copywriting-add">
-              <input type="text" id="copywritingNewInput" placeholder="输入新文案,回车或点添加">
+              <textarea id="copywritingNewInput" rows="3" placeholder="输入文案，Enter 换行，Ctrl+Enter 或点添加；最多 2000 个字符"></textarea>
               <button class="task-btn task-btn-start" id="copywritingAddBtn"><span class="material-symbols-outlined">add</span>添加</button>
             </div>
           </div>
@@ -519,6 +483,8 @@
             <div class="settings-row"><span class="settings-label">无障碍桥接</span><span class="settings-value" id="setEmuBridge">--</span></div>
             <div class="settings-row"><span class="settings-label">运行模式</span><span class="settings-value" id="setRunMode">--</span></div>
             <div class="settings-row"><label class="settings-label" for="executionMode">执行模式</label><select id="executionMode"><option value="android">真实模式</option><option value="demo">演示（不发送）</option></select></div>
+            <div class="settings-row"><label class="settings-label" for="senderAccountUid">发送账号 UID</label><input id="senderAccountUid" type="text" inputmode="numeric" maxlength="32" autocomplete="off" placeholder="填写模拟器当前登录账号的 UID"><button class="save-btn ghost" id="setSenderAccountBtn">保存账号</button></div>
+            <div class="field-hint">真实私聊前请在双鱼部落个人主页核对本人 UID 后填写。发送统计和去重按账号、模拟器分别保存；切换登录账号后请更新此处。软件不会自动识别账号切换。</div>
             <div class="field-hint" style="margin-top:12px;">
               <span class="material-symbols-outlined">info</span>
               真实模式通过<b>雷电模拟器 + ADB</b> 驱动安卓版「双鱼部落」。请先启动雷电模拟器并登录双鱼部落。

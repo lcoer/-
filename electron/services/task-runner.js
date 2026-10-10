@@ -3,7 +3,6 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const { randomUUID } = require('crypto');
 const { DeviceSession } = require('./device-session');
-const appConfig = require('../config');
 const { isDefinitiveSendRejection } = require('../../src/send-proof.cjs');
 const modulePath = name => pathToFileURL(path.join(__dirname, '..', '..', 'src', name)).href;
 const modules = Promise.all(['task-policy.mjs', 'task-result.mjs'].map(n => import(modulePath(n))));
@@ -55,7 +54,7 @@ function createTaskRunner(deps = {}) {
   const emptyStats = () => ({
     sent: 0, ok: 0, fail: 0, unconfirmed: 0, cancelled: 0, skipped: 0, simulated: 0, clicked: 0
   });
-  for (const name of ['private', 'welcome', 'call', 'collect', 'resolve'])
+  for (const name of ['private', 'collect', 'resolve'])
     tasks.set(name, { name, state: 'stopped', running: false, stats: emptyStats(), mode: 'android' });
   function log(task, level, msg) {
     try {
@@ -82,7 +81,7 @@ function createTaskRunner(deps = {}) {
       const stats = { ...t.stats };
       if (name === 'private') {
         Object.assign(stats, dataStore.getCounts(dataStore.getMachineCode(), 'private'));
-        stats.pending = dataStore.getPendingResults ? dataStore.getPendingResults().length : stats.unconfirmed;
+        stats.pending = dataStore.getPendingResults ? dataStore.getPendingResults(dataStore.getMachineCode()).length : stats.unconfirmed;
       }
       if (name === 'collect' && collector && collectorRunId === t.runId)
         Object.assign(stats, collector.getStatus());
@@ -103,6 +102,8 @@ function createTaskRunner(deps = {}) {
     if (tasks.get(t.name) !== t)
       return;
     t.running = false;
+    t.stats.phase = null;
+    t.stats.waitMs = 0;
     t.state = error && error.name !== 'AbortError' ? 'failed' : 'stopped';
     t.error = t.state === 'failed' ? error.message : null;
     session.release(t.name, t.runId);
@@ -116,6 +117,7 @@ function createTaskRunner(deps = {}) {
     if (!info || info.mode !== 'android' || !info.serial)
       throw Error('REAL_MODE_REQUIRED: 请连接模拟器');
     const drv = await createDriver(info);
+    t.deviceInfo = info;
     cancelled(signal);
     drv.setSignal?.(signal);
     await drv.ensureReady();
@@ -172,7 +174,7 @@ function createTaskRunner(deps = {}) {
   async function recordPrivate(t, result) {
     // Real counts derive from the durable journal; demo results remain separate.
     const [, { normalizeResult, countResult }] = await modules;
-    const r = normalizeResult(result, { runId: t.runId, mode: t.mode, targetUid: result.targetUid, machineCode: dataStore.getMachineCode(), task: 'private' });
+    const r = normalizeResult({ ...result, senderAccountUid: t.senderAccountUid, senderDeviceKey: t.senderDeviceKey }, { runId: t.runId, mode: t.mode, targetUid: result.targetUid, machineCode: t.machineCode || dataStore.getMachineCode(), task: 'private' });
     if (t.mode === 'android')
       dataStore.recordOutcome(r);
     countResult(t.stats, r);
@@ -187,16 +189,37 @@ function createTaskRunner(deps = {}) {
         throw Error(checked.reason);
       if (checked.duplicates.length)
         log('private', 'skip', `去除 ${checked.duplicates.length} 个重复目标`);
-      if (t.mode === 'android')
+      if (t.mode === 'android') {
+        const settings = dataStore.getConfig('settings') || {};
+        if (!/^\d{1,32}$/.test(settings.senderAccountUid || ''))
+          throw Error('SENDER_ACCOUNT_REQUIRED: 请先在设置页填写并核对当前登录的发送账号 UID；更换账号后需要更新');
+        if (config.senderAccountUid != null && config.senderAccountUid !== settings.senderAccountUid)
+          throw Error('SENDER_ACCOUNT_CHANGED: 发送账号设置已变化，请重新确认并启动任务');
+        t.senderAccountUid = settings.senderAccountUid;
         await readyDriver(t);
+        cancelled(t.controller.signal);
+        const currentSettings = dataStore.getConfig('settings') || {};
+        if (currentSettings.senderAccountUid !== t.senderAccountUid)
+          throw Error('SENDER_ACCOUNT_CHANGED: 发送账号设置已变化，请重新启动任务');
+        // ADB executable upgrades do not change the connected local device.
+        t.senderDeviceKey = JSON.stringify(['local-adb', t.deviceInfo.serial]);
+        dataStore.setConfig('settings', { ...currentSettings, senderDeviceKey: t.senderDeviceKey });
+        t.machineCode = dataStore.getMachineCode();
+      }
       return checked.config;
     }, async (t, cfg) => {
-      const signal = t.controller.signal, black = new Set((cfg.blacklist || []).map(String)), machine = dataStore.getMachineCode();
+      const signal = t.controller.signal, black = new Set((cfg.blacklist || []).map(String)), machine = t.machineCode || dataStore.getMachineCode();
       let failures = 0;
       log('private', 'info', `本次共 ${cfg.targets.length} 个目标，用户间隔 ${cfg.delayMin}–${cfg.delayMax} 秒`);
       for (let i = 0; i < cfg.targets.length; i++) {
         cancelled(signal);
+        if (t.mode === 'android' && dataStore.getConfig('settings')?.senderAccountUid !== t.senderAccountUid)
+          throw Error('SENDER_ACCOUNT_CHANGED: 发送账号设置已变化，请重新确认并启动任务');
         const target = cfg.targets[i];
+        t.stats.phase = 'processing';
+        t.stats.nextTargetUid = target.uid;
+        t.stats.waitMs = 0;
+        emitStatus();
         if (black.has(target.uid) || (t.mode === 'android' && (dataStore.isPending(machine, target.uid) || (cfg.noDuplicate !== false && dataStore.isSentToday(machine, target.uid))))) {
           t.stats.skipped++;
           log('private', 'skip', `${target.uid}: 黑名单、今日已处理或存在待确认结果`);
@@ -213,8 +236,10 @@ function createTaskRunner(deps = {}) {
               onBeforeSend: async () => {
                 // Save intent before clicking send so a process crash cannot trigger a retry.
                 cancelled(signal);
+                if (dataStore.getConfig('settings')?.senderAccountUid !== t.senderAccountUid)
+                  throw Error('SENDER_ACCOUNT_CHANGED: 发送账号设置已变化，请重新确认并启动任务');
                 dataStore.recordOutcome({
-                  mode: 'android', outcome: 'unconfirmed', stage: 'dispatch', reason: 'DISPATCH_INTENT', runId: t.runId, targetUid: target.uid, machineCode: machine, task: 'private'
+                  mode: 'android', outcome: 'unconfirmed', stage: 'dispatch', reason: 'DISPATCH_INTENT', runId: t.runId, targetUid: target.uid, machineCode: machine, senderAccountUid: t.senderAccountUid, senderDeviceKey: t.senderDeviceKey, task: 'private'
                 });
                 intent = true;
               },
@@ -226,6 +251,14 @@ function createTaskRunner(deps = {}) {
         if (intent && result?.outcome !== 'confirmed_ui' && (signal.aborted || !isDefinitiveSendRejection(result, target.uid)))
           result = { ...result, outcome: 'unconfirmed', reason: result?.reason || 'DISPATCH_NOT_CONFIRMED' };
         const r = await recordPrivate(t, { ...result, targetUid: target.uid });
+        if (!signal.aborted && isDefinitiveSendRejection(r, target.uid) && typeof t.driver.returnPrivateHome === 'function') {
+          log('private', 'info', '本条因贡献等级不足失败，正在退出当前聊天；不重发本条');
+          try { await t.driver.returnPrivateHome({signal,onLog:(l,m)=>log('private',l,m)}); }
+          catch (error) {
+            if (error.name === 'AbortError') throw error;
+            throw Error(`PRIVATE_RECOVERY_FAILED: 返回列表失败，已停止批次：${error.message}`);
+          }
+        }
         failures = r.outcome === 'failed' && !isDefinitiveSendRejection(r, target.uid) ? failures + 1 : 0;
         if (signal.aborted || ['unconfirmed', 'cancelled'].includes(r.outcome) || failures >= 5 || (cfg.sendLimit > 0 && t.stats.ok + t.stats.simulated >= cfg.sendLimit)) {
           if (r.outcome === 'unconfirmed')
@@ -236,69 +269,17 @@ function createTaskRunner(deps = {}) {
             log('private', 'info', `已达到本轮发送上限 ${cfg.sendLimit}`);
           break;
         }
-        if (i < cfg.targets.length - 1)
-          await sleep(t.mode === 'demo' ? 0 : (cfg.delayMin + Math.random() * (cfg.delayMax - cfg.delayMin)) * 1000, signal);
+        if (i < cfg.targets.length - 1) {
+          const waitMs = t.mode === 'demo' ? 0 : (cfg.delayMin + Math.random() * (cfg.delayMax - cfg.delayMin)) * 1000;
+          t.stats.phase = 'waiting';
+          t.stats.waitMs = waitMs;
+          t.stats.nextTargetUid = cfg.targets[i + 1].uid;
+          log('private', 'info', `等待用户设置的间隔 ${Math.ceil(waitMs / 1000)} 秒，下一目标 UID ${t.stats.nextTargetUid}`);
+          emitStatus();
+          await sleep(waitMs, signal);
+        }
       }
       return { ...t.stats };
-    });
-  }
-  function startCall(config) {
-    return launch('call', config, async (t) => {
-      const [{ validateCallConfig }] = await modules, checked = validateCallConfig(config);
-      if (!checked.ok)
-        throw Error(checked.reason);
-      if (t.mode === 'android')
-        await readyDriver(t);
-      return checked.config;
-    }, async (t, cfg) => {
-      while (!t.controller.signal.aborted) {
-        const ok = t.mode === 'demo' ? true : await t.driver._sendCallOnce(cfg.emoji);
-        if (t.mode === 'demo')
-          t.stats.simulated++;
-        else if (ok) {
-          t.stats.sent++;
-          t.stats.unconfirmed++;
-        }
-        else
-          t.stats.fail++;
-        log('call', ok ? 'info' : 'fail', t.mode === 'demo' ? '模拟打call（未操作设备）' : ok ? '已执行打call动作（未核验送达）' : '未找到可用表情入口');
-        emitStatus();
-        await sleep((cfg.delayMin + Math.random() * (cfg.delayMax - cfg.delayMin)) * 1000, t.controller.signal);
-      }
-    });
-  }
-  function startWelcome(config) {
-    return launch('welcome', config, async (t) => {
-      if (t.mode === 'android')
-        await readyDriver(t);
-    }, async (t) => {
-      if (t.mode === 'demo') {
-        while (!t.controller.signal.aborted) {
-          t.stats.simulated++;
-          log('welcome', 'info', '模拟欢迎（未操作设备）');
-          emitStatus();
-          await sleep(3500, t.controller.signal);
-        }
-        return;
-      }
-      const handle = await t.driver.startAutoWelcome({ signal: t.controller.signal, intervalMs: appConfig.taskRunner.welcomePollIntervalMs, onEvent: ev => {
-          if (t.controller.signal.aborted)
-            return;
-          if (ev.ok) {
-            t.stats.clicked++;
-            t.stats.unconfirmed++;
-          }
-          else
-            t.stats.skipped++;
-          log('welcome', ev.ok ? 'info' : 'skip', `${ev.key}: ${ev.ok ? '欢迎动作已执行（未核验送达）' : '未找到欢迎入口'}`);
-          emitStatus();
-        } });
-      try {
-        await untilAbort(t.controller.signal);
-      }
-      finally {
-        await handle.stop();
-      }
     });
   }
   function start(name, config = {}) {
@@ -306,12 +287,11 @@ function createTaskRunner(deps = {}) {
       return Promise.resolve({ ok: false, reason: 'INVALID_CONFIG' });
     if (config.executionMode != null && !['android', 'demo'].includes(config.executionMode))
       return Promise.resolve({ ok: false, reason: 'INVALID_EXECUTION_MODE' });
+    // Capture renderer input before the first async boundary; a running batch owns its plan.
+    try { config = structuredClone(config); }
+    catch { return Promise.resolve({ ok: false, reason: 'INVALID_CONFIG' }); }
     if (name === 'private')
       return startPrivate(config);
-    if (name === 'call')
-      return startCall(config);
-    if (name === 'welcome')
-      return startWelcome(config);
     return Promise.resolve({ ok: false, reason: 'UNKNOWN_TASK' });
   }
   async function stop(name) {

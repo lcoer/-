@@ -23,6 +23,13 @@ test('unknown online and guild remain unknown; placeholders do not merge by nick
  const s=store(); s.ingestRealRecords([{uid:'nabc',uidReal:false,nickname:'same'},{uid:'123',nickname:'same'}]);
  assert.equal(s.getRecords().total,2); const r=s.getRecords().records[0]; assert.equal(r.online,null);assert.equal(r.guildKnown,false);
 });
+
+test('gender badge evidence persists and unknown repeat observations preserve known gender',()=>{
+ const s=store();const evidence={kind:'gender_badge_symbol',sex:'female',confidence:0.9};
+ s.ingestRealRecords([{uid:'12345',sex:'female',sexEvidence:evidence}]);s.ingestRealRecords([{uid:'12345',sex:'unknown'}]);
+ assert.equal(s.getStats().femaleCount,1);assert.equal(s.getRecords().records[0].sex,'female');assert.equal(s.getRecords().records[0].sexEvidence.confidence,0.9);
+ s.ingestRealRecords([{uid:'12345',sex:'male'}]);assert.equal(s.getStats().maleCount,1);assert.equal(s.getRecords().records[0].sexEvidence,undefined);
+});
 test('persistent history and pending outcomes survive restart; legacy and simulation are isolated',()=>{
  const dir=fs.mkdtempSync(path.join(__dirname,'syl-store-'));
  try {
@@ -71,9 +78,9 @@ test('corrupt outcome journal recovers pending backup, otherwise fails closed',(
  const dir=fs.mkdtempSync(path.join(__dirname,'syl-store-'));try{
  const s=store({dataDir:dir,persist:true});s.recordOutcome({runId:'r1',machineCode:'m',targetUid:'123',mode:'android',outcome:'unconfirmed'});
  s.recordOutcome({runId:'r1',machineCode:'m',targetUid:'123',mode:'android',outcome:'confirmed_ui'});
- fs.writeFileSync(path.join(dir,'outcomes-v2.json'),'{broken');const recovered=store({dataDir:dir,persist:true});assert.equal(recovered.isPending('m','123'),true);
+ fs.writeFileSync(path.join(dir,'outcomes-v3.jsonl'),'{broken');const recovered=store({dataDir:dir,persist:true});assert.equal(recovered.isPending('m','123'),true);
  assert.equal(recovered.isPending('m','999'),true);assert.equal(recovered.getStatus().recoveryRequired,true);
- fs.writeFileSync(path.join(dir,'outcomes-v2.json.bak'),'{broken');assert.throws(()=>store({dataDir:dir,persist:true}),/DATA_CORRUPT/);
+ fs.writeFileSync(path.join(dir,'outcomes-v3.jsonl.bak'),'{broken');assert.throws(()=>store({dataDir:dir,persist:true}),/DATA_CORRUPT/);
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
 test('syntactically valid but malformed journal fails closed',()=>{
@@ -97,7 +104,7 @@ test('manual resolution persists and a failed write leaves pending unchanged',()
  s.recordOutcome({...r,outcome:'unconfirmed'});s.resolvePending({...r,resolution:'not_sent'});
  s=store({dataDir:dir,persist:true});assert.equal(s.isPending('m','123'),false);
  s.recordOutcome({...r,runId:'r2',outcome:'unconfirmed'});
- fs.unlinkSync(path.join(dir,'outcomes-v2.json'));fs.mkdirSync(path.join(dir,'outcomes-v2.json'));
+ fs.unlinkSync(path.join(dir,'outcomes-v3.jsonl'));fs.mkdirSync(path.join(dir,'outcomes-v3.jsonl'));
  assert.throws(()=>s.resolvePending({...r,runId:'r2',resolution:'confirmed'}));assert.equal(s.isPending('m','123'),true);assert.equal(s.getCounts('m','private').today,0);
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
@@ -190,6 +197,61 @@ test('collection coverage deduplicates all historical verified users and rooms',
 });
 
 const hintUid = (nick,room) => 'n'+require('node:crypto').createHash('sha256').update(`${room}\0${nick}`).digest('hex').slice(0,24);
+test('clearing demo rows preserves explicit execution mode and stream',()=>{
+ const s=store();s.setConfig('settings',{executionMode:'demo'});s.setSource('demo');
+ s.clearDemoRecords();assert.equal(s.getConfig('settings').executionMode,'demo');assert.equal(s.getStatus().source,'demo');assert.equal(s.getStatus().streaming,true);s.shutdown();
+});
+
+test('clearing demo data preserves the same mode after restart',()=>{
+ const dir=fs.mkdtempSync(path.join(__dirname,'syl-store-'));let s;
+ try {
+  s=store({dataDir:dir,persist:true});s.setConfig('settings',{executionMode:'demo'});s.setSource('demo');s.clearDemoRecords();s.shutdown();
+  s=store({dataDir:dir,persist:true});assert.equal(s.getConfig('settings').executionMode,'demo');assert.equal(s.getStatus().source,'demo');assert.equal(s.getStatus().streaming,true);
+ }finally{s?.shutdown();fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('account scopes isolate confirmed results and preserve unattributed pending safety',()=>{
+ const s=store();assert.equal(s.getMachineCode(),'unconfigured');
+ s.setConfig('settings',{senderAccountUid:'123',senderDeviceKey:'device'});const a=s.getMachineCode();
+ s.recordOutcome({machineCode:a,targetUid:'456',mode:'android',outcome:'confirmed_ui'});
+ s.setConfig('settings',{senderAccountUid:'789',senderDeviceKey:'device'});const b=s.getMachineCode();assert.notEqual(a,b);assert.equal(s.isSentToday(b,'456'),false);assert.equal(s.getCounts(b,'private').today,0);
+ s.setConfig('settings',{senderAccountUid:'123',senderDeviceKey:'another-device'});const c=s.getMachineCode();assert.notEqual(a,c);assert.equal(s.isSentToday(c,'456'),false);
+ s.recordOutcome({runId:'legacy',machineCode:'DEMO-MACHINE',targetUid:'456',mode:'android',outcome:'unconfirmed'});
+ assert.equal(s.isPending(b,'456'),true);assert.equal(s.getPendingResults(b).length,1);
+ s.resolvePending({runId:'legacy',machineCode:'DEMO-MACHINE',targetUid:'456',resolution:'not_sent'});assert.equal(s.isPending(b,'456'),false);
+});
+
+test('new outcome writes and queries never reread or rewrite historical results',t=>{
+ const dir=fs.mkdtempSync(path.join(__dirname,'syl-store-'));
+ try {
+  const results=Array.from({length:512},(_,i)=>({at:today,runId:`old-${i}`,machineCode:'m',targetUid:String(1000+i),mode:'android',outcome:'confirmed_ui'}));
+  fs.writeFileSync(path.join(dir,'outcomes-v2.json'),JSON.stringify({schemaVersion:2,results}));
+  const s=store({dataDir:dir,persist:true});
+  const originalWrite=fs.writeFileSync,originalOpen=fs.openSync,originalSync=fs.fsyncSync;let bytes=0,syncs=0;
+  t.mock.method(fs,'readFileSync',()=>{throw Error('Historical reads are forbidden during dispatch');});
+  t.mock.method(fs,'openSync',(file,flags,...args)=>{assert.equal(flags,'a');return originalOpen(file,flags,...args);});
+  t.mock.method(fs,'writeFileSync',(file,value,...args)=>{assert.equal(typeof file,'number');bytes+=Buffer.byteLength(value);return originalWrite(file,value,...args);});
+  t.mock.method(fs,'fsyncSync',fd=>{syncs++;return originalSync(fd);});
+  s.recordOutcome({runId:'new',machineCode:'m',targetUid:'99999',mode:'android',outcome:'confirmed_ui'});
+  assert.equal(s.getCounts('m','private').today,513);assert.equal(s.isSentToday('m','99999'),true);assert.equal(s.getPendingResults().length,0);
+  assert.equal(syncs,2);assert.ok(bytes<2048,`Only the new result should be written: ${bytes} bytes`);
+  t.mock.restoreAll();assert.equal(store({dataDir:dir,persist:true}).getCounts('m','private').today,513);
+ }finally{t.mock.restoreAll();fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('legacy v2 outcomes remain read-only while new journal appends survive restart',()=>{
+ const dir=fs.mkdtempSync(path.join(__dirname,'syl-store-'));try{
+ const legacy=JSON.stringify({schemaVersion:2,results:[{at:today,runId:'old',machineCode:'m',targetUid:'123',mode:'android',outcome:'unconfirmed'}]});fs.writeFileSync(path.join(dir,'outcomes-v2.json'),legacy);
+ let s=store({dataDir:dir,persist:true});s.recordOutcome({runId:'new',machineCode:'m',targetUid:'456',mode:'android',outcome:'confirmed_ui'});const prefix=fs.readFileSync(path.join(dir,'outcomes-v3.jsonl'),'utf8');
+ s.recordOutcome({runId:'new2',machineCode:'m',targetUid:'789',mode:'android',outcome:'unconfirmed'});assert.ok(fs.readFileSync(path.join(dir,'outcomes-v3.jsonl'),'utf8').startsWith(prefix));assert.equal(fs.readFileSync(path.join(dir,'outcomes-v2.json'),'utf8'),legacy);
+ s=store({dataDir:dir,persist:true});assert.equal(s.isPending('m','123'),true);assert.equal(s.isPending('m','789'),true);assert.equal(s.getCounts('m','private').today,1);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('torn append and checksum corruption block sends and never discard intent',()=>{
+ const dir=fs.mkdtempSync(path.join(__dirname,'syl-store-'));try{
+ let s=store({dataDir:dir,persist:true});s.recordOutcome({runId:'r',machineCode:'m',targetUid:'123',mode:'android',outcome:'unconfirmed'});
+ fs.appendFileSync(path.join(dir,'outcomes-v3.jsonl'),'{partial');s=store({dataDir:dir,persist:true});assert.equal(s.getStatus().recoveryRequired,true);assert.equal(s.getPendingResults()[0].targetUid,'123');assert.throws(()=>s.recordOutcome({machineCode:'m',targetUid:'999',mode:'android',outcome:'unconfirmed'}),/DATA_RECOVERY_REQUIRED/);
+ const backup=fs.readFileSync(path.join(dir,'outcomes-v3.jsonl.bak'),'utf8');fs.writeFileSync(path.join(dir,'outcomes-v3.jsonl'),backup.replace('123','999'));s=store({dataDir:dir,persist:true});assert.equal(s.getPendingResults()[0].targetUid,'123');assert.equal(s.getStatus().recoveryRequired,true);
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
 function cardProof(overrides={}) { return {uid:'12345',uidReal:true,nickname:'Alice',roomCode:'9277',source:'room_observation',seenFrom:'roomProfile',evidence:'matched_room_user_card',resolvedFrom:hintUid('Alice','9277'),...overrides}; }
 test('exact room-card evidence resolves only its scoped hint and preserves proven fields',()=>{
  const s=store();s.ingestRealRecords([{uid:hintUid('Alice','9277'),uidReal:false,nickname:'Alice',roomCode:'9277',sex:'female',guild:'hintGuild'}]);

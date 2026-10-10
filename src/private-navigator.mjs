@@ -7,12 +7,14 @@ const numeric = text => /^\(?\d+\)?$/.test((text || '').trim()) ? text.trim().re
 
 /** Find a user by exact UID through the observed search/profile/chat screens. */
 export class PrivateNavigator {
-  constructor(driver, {signal, onLog = () => {}, timeoutMs = 6000, pollIntervalMs = 180} = {}) {
+  constructor(driver, {signal, onLog = () => {}, timeoutMs = 6000, pollIntervalMs = 180, actionGapMs = 1800} = {}) {
     this.driver = driver;
     this.signal = signal;
     this.onLog = onLog;
     this.timeoutMs = timeoutMs;
     this.pollIntervalMs = pollIntervalMs;
+    this.actionGapMs = actionGapMs;
+    this.lastActionAt = 0;
     this.size = null;
     this.peer = null;
   }
@@ -22,6 +24,7 @@ export class PrivateNavigator {
     throwIfAborted(this.signal);
     const root = nodes[0];
     if (root?.packageName !== PACKAGE) throw Error('PRIVATE_WRONG_PACKAGE');
+    this.rawNodes = nodes;
     if (/FrameLayout|View$/.test(root.className || '') && root.x === 0 && root.y >= 0 &&
       root.y < root.y2 && Number.isFinite(root.x2) && Number.isFinite(root.y2) && root.x2 >= 320 && root.y2 >= 320)
       this.size = {w:root.x2,h:root.y2};
@@ -46,14 +49,34 @@ export class PrivateNavigator {
     } while (Date.now() <= deadline);
     throw Error(reason);
   }
-  async _tap(node) {
+  async _tap(node, {validate} = {}) {
     throwIfAborted(this.signal);
     if (!node) throw Error('PRIVATE_CONTROL_NOT_FOUND');
-    await this.driver.adb.tap((node.x+node.x2)/2,(node.y+node.y2)/2);
+    await abortableSleep(Math.max(0,this.actionGapMs-(Date.now()-this.lastActionAt)),this.signal);
+    const fresh=await this._snapshot();
+    if(validate&&!validate(fresh))throw Error('PRIVATE_CONTEXT_CHANGED');
+    const matches=fresh.filter(n=>n.shortId===node.shortId&&n.text===node.text);
+    if(matches.length!==1)throw Error('PRIVATE_CONTROL_CHANGED');
+    node=matches[0];
+    let result;
+    // Android can consume a physical click while the search EditText changes
+    // focus. A unique observed resource ID invokes the actual control action.
+    // Count raw nodes as well, so an offscreen duplicate cannot be chosen.
+    if (node.shortId && this.rawNodes?.filter(n=>n.shortId===node.shortId).length===1 && typeof this.driver.bridge.tapById==='function')
+      result=await this.driver.bridge.tapById(node.shortId,{signal:this.signal});
+    else if (typeof this.driver.bridge.tapByCoord==='function')
+      result=await this.driver.bridge.tapByCoord((node.x+node.x2)/2,(node.y+node.y2)/2,{signal:this.signal});
+    else
+      await this.driver.adb.tap((node.x+node.x2)/2,(node.y+node.y2)/2);
     throwIfAborted(this.signal);
+    if(result && result.ok!==true)throw Error(`PRIVATE_CLICK_UNCONFIRMED: ${result.error||'UNKNOWN'}`);
+    this.lastActionAt=Date.now();
+    return result;
   }
   async _back() {
     throwIfAborted(this.signal);
+    const controls=this.rawNodes?.filter(n=>n.shortId==='iv_back')||[];
+    if(controls.length===1 && typeof this.driver.bridge.tapById==='function')return this._tap(controls[0]);
     await this.driver.adb.back();
     throwIfAborted(this.signal);
   }
@@ -61,13 +84,13 @@ export class PrivateNavigator {
     // tv_nice_num is accepted only on this full profile (iv_copy + iv_chat +
     // iv_follow), never as general room/card identity evidence.
     if (!this._unique(nodes,'iv_chat') || !this._unique(nodes,'iv_follow') ||
-      !this._unique(nodes,'iv_copy') || nodes.some(n => ['et_search','input_message'].includes(n.shortId))) return null;
+      !(this._unique(nodes,'iv_copy') || this._unique(nodes,'ll_copy')) || nodes.some(n => ['et_search','input_message'].includes(n.shortId))) return null;
     const nickname = this._unique(nodes,'tv_nickname')?.text?.trim();
-    const codes = nodes.filter(n => ['tv_nice_num','tv_user_code'].includes(n.shortId));
-    if (!nickname || !codes.length || codes.some(n => !numeric(n.text))) return null;
-    const ids = new Set(codes.map(n => numeric(n.text)));
-    if (ids.size !== 1) return null;
-    return {uid:[...ids][0],nickname,nodes};
+    const realCodes=nodes.filter(n=>n.shortId==='tv_user_code');
+    const codes=realCodes.length?realCodes:nodes.filter(n=>n.shortId==='tv_nice_num');
+    if (!nickname || codes.length!==1 || !numeric(codes[0].text)) return null;
+    if(!realCodes.length&&!this._unique(nodes,'iv_copy'))return null;
+    return {uid:numeric(codes[0].text),nickname,nodes};
   }
   _chat(nodes, nickname) {
     return !!this._unique(nodes,'input_message') && !!this._unique(nodes,'iv_send') &&
@@ -114,8 +137,11 @@ export class PrivateNavigator {
       if (!row || nodes.some(n => n.shortId === 'tv_room_name' && inside(n,row))) continue;
       const names = nodes.filter(n => n.shortId === 'tv_name' && n.text?.trim() && inside(n,row));
       const codes = nodes.filter(n => ['tv_nice_num','tv_user_code'].includes(n.shortId) && inside(n,row));
-      if (names.length !== 1 || codes.length !== 1) throw Error('AMBIGUOUS_USER_RESULT');
-      candidates.push(names[0]);
+      const realCodes=codes.filter(n=>n.shortId==='tv_user_code');
+      const identity=realCodes.length?realCodes:codes;
+      if (names.length !== 1 || identity.length !== 1) throw Error('AMBIGUOUS_USER_RESULT');
+      if(numeric(identity[0].text)!==uid)continue;
+      if(!candidates.includes(names[0]))candidates.push(names[0]);
     }
     if (candidates.length > 1) throw Error('AMBIGUOUS_USER_RESULT');
     return candidates[0] || null;
@@ -126,6 +152,9 @@ export class PrivateNavigator {
       error.actualUid = profile.uid;
       throw error;
     }
+  }
+  async returnHome() {
+    return this._home();
   }
   async open(uid) {
     uid = String(uid || '');
@@ -170,5 +199,9 @@ export class PrivateNavigator {
     const nodes = await this._snapshot();
     if (!this.peer || !this._chat(nodes,this.peer.nickname)) throw Error('CHAT_CONTEXT_CHANGED');
     return {nodes};
+  }
+  async clickSend(text) {
+    const {nodes}=await this.readChat();
+    return this._tap(this._unique(nodes,'iv_send'),{validate:ns=>this.peer&&this._chat(ns,this.peer.nickname)&&this._unique(ns,'input_message')?.text===text});
   }
 }

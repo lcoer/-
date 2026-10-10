@@ -18,11 +18,24 @@ import { findById } from './adb-client.mjs';
 import { ROOM_IDS } from './android-driver.mjs';
 import { CollectionController } from './collection-controller.mjs';
 import { placeholderUid } from './observation-identity.mjs';
+import {genderFromBadgeNodes} from './user-gender.mjs';
 
 import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
 function nearest(nodes, reference, maxDistance) {
  const candidates = nodes.map(node=>({node,d:Math.hypot(node.centerX-reference.centerX,node.centerY-reference.centerY)})).filter(c=>c.d<maxDistance).sort((a,b)=>a.d-b.d);
  return candidates.length && (!candidates[1] || candidates[1].d-candidates[0].d>12) ? candidates[0].node : null;
+}
+
+// Flattened dumps have no parent relationship. A surrounding rectangle alone
+// cannot prove message ownership; accept only a mutually unique text-row pair.
+function messageCode(nickNodes, codeNodes, nickname) {
+  const hasVerticalBounds = n => Number.isFinite(n.y) && Number.isFinite(n.y2) && n.y2 > n.y;
+  const sameRow = (a,b) => Number.isFinite(a.centerY) && Number.isFinite(b.centerY)
+    && Math.abs(a.centerY-b.centerY) <= 12
+    && (!(hasVerticalBounds(a) && hasVerticalBounds(b)) || Math.min(a.y2,b.y2) > Math.max(a.y,b.y));
+  const codes = codeNodes.filter(n=>sameRow(n,nickname));
+  if (codes.length !== 1) return null;
+  return nickNodes.filter(n=>sameRow(n,codes[0])).length === 1 ? codes[0] : null;
 }
 
 // 从房间控件树里抽取"当前在线用户"
@@ -41,22 +54,18 @@ export function extractRoomUsers(nodes, context = {}) {
     users.set(key, { ...prev, ...patch, uid: key });
   };
 
-  // 昵称 -> 真实 uid(来自公屏),用于给麦位昵称补真实 uid
-  const nickToUid = new Map();
-
   // ---- 1) 公屏消息:昵称 + 数字 ID ----
   const nickNodes = [ROOM_IDS.msgNickname, ROOM_IDS.msgNicknameAlt]
     .flatMap(id => findById(nodes, id));
   const codeNodes = [ROOM_IDS.msgUserCode, ROOM_IDS.msgUserCodeAlt]
-    .flatMap(id => findById(nodes, id));
+    .flatMap(id => findById(nodes, id))
+    .filter(c=>/^\(?\d{5,}\)?$/.test((c.text||'').trim()));
   for (const n of nickNodes) {
     const nick = (n.text || '').trim();
     if (!nick) continue;
-    const code = nearest(codeNodes.filter(c=>/^\(?\d{5,}\)?$/.test((c.text||'').trim())),n,250);
+    const code = messageCode(nickNodes,codeNodes,n);
     if (code) {
       const uid = code.text.replace(/[()]/g,'').trim();
-      if (!nickToUid.has(nick)) nickToUid.set(nick, uid);
-      else if(nickToUid.get(nick) !== uid) nickToUid.set(nick,null);
       upsert(uid, { nickname: nick, uidReal: true, seenFrom: 'publicScreen' });
     } else {
       upsert(placeholderUid(nick,context), { nickname: nick, uidReal: false, seenFrom: 'publicScreen' });
@@ -67,9 +76,8 @@ export function extractRoomUsers(nodes, context = {}) {
   for (const w of findById(nodes, ROOM_IDS.wheatName)) {
     const nick = (w.text || '').trim();
     if (!nick || /贵宾席位|申请上麦|空|虚位/.test(nick)) continue;
-    const realUid = nickToUid.get(nick);
-    upsert(realUid || placeholderUid(nick,context), {
-      nickname: nick, uidReal: !!realUid, seenFrom: 'wheat',
+    upsert(placeholderUid(nick,context), {
+      nickname: nick, uidReal: false, seenFrom: 'wheat',
     });
   }
 
@@ -81,12 +89,9 @@ export function extractRoomUsers(nodes, context = {}) {
     const near = nearest(wheatNodes,n,160);
     if (!near) continue;
     const nick = (near.text || '').trim();
-    const realUid = nickToUid.get(nick);
-    const key = realUid || placeholderUid(nick,context);
-    const female = /female|woman|girl|女/i.test(sid) || n.text === '女' || (n.contentDesc || n.desc) === '女';
-    const male = /male|man|boy|男/i.test(sid) || n.text === '男' || (n.contentDesc || n.desc) === '男';
-    if (female) upsert(key, { sex: 'female' });
-    else if (male) upsert(key, { sex: 'male' });
+    const key = placeholderUid(nick,context);
+    const sex=genderFromBadgeNodes([n]);
+    if (sex!=='unknown') upsert(key, { sex });
   }
 
   return [...users.values()].filter(u => u.nickname);

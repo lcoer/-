@@ -46,6 +46,61 @@ app.whenReady().then(async () => {
   })()`);
     if (checks.mode !== 'android' || !checks.mediaDisabled || !checks.emptyRejected || !checks.mainValidation || !checks.ui)
       throw Error(`Renderer assertions failed: ${JSON.stringify(checks)}`);
+    Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
+      const responses=await Promise.all(['welcome','call'].map(name=>window.api.task.start(name,{executionMode:'demo'})));
+      const status=await window.api.task.getStatus();
+      return {removedRoomTasks:!document.querySelector('[data-task="welcome"],[data-task="call"]')&&!document.getElementById('taskWelcomeStart')&&!document.getElementById('taskCallStart')&&!Object.hasOwn(status,'welcome')&&!Object.hasOwn(status,'call')&&responses.every(r=>!r.ok&&r.reason==='UNKNOWN_TASK')};
+    })()`));
+    if(!checks.removedRoomTasks)throw Error('Deleted room tasks still exposed');
+    store.setConfig('settings', { ...store.getConfig('settings'), senderDeviceKey: 'smoke-device' });
+    store.recordOutcome({ runId: `smoke-legacy-${Date.now()}`, machineCode: 'DEMO-MACHINE', targetUid: '99999', mode: 'android', outcome: 'unconfirmed' });
+    Object.assign(checks, await win.webContents.executeJavaScript(`(async()=>{
+      document.getElementById('senderAccountUid').value='77777';
+      document.getElementById('setSenderAccountBtn').click();
+      const deadline=Date.now()+3000;
+      while((await window.api.config.get('settings')).senderAccountUid!=='77777') {
+        if(Date.now()>deadline) throw Error('Sender account form did not save');
+        await new Promise(resolve=>setTimeout(resolve,50));
+      }
+      const switched=await window.api.config.set('settings',{executionMode:'demo',senderDeviceKey:'spoof'});
+      const settings=await window.api.config.get('settings');
+      const cleared=await window.api.portal.clearDemo(false);
+      const source=await window.api.portal.getStatus();
+      await window.api.config.set('settings',{executionMode:'android'});
+      const pending=(await window.api.task.getPending()).results.find(r=>r.machineCode==='DEMO-MACHINE'&&r.targetUid==='99999');
+      const resolved=await window.api.task.resolvePending({machineCode:pending.machineCode,targetUid:pending.targetUid,runId:pending.runId,resolution:'not_sent'});
+      await Settings.refresh();
+      return {senderSettings:switched.ok&&settings.senderAccountUid==='77777'&&settings.senderDeviceKey==='smoke-device',clearKeepsDemo:cleared.ok&&source.source==='demo'&&source.streaming,legacyReview:resolved.ok};
+    })()`));
+    if (!checks.senderSettings || !checks.clearKeepsDemo || !checks.legacyReview)
+      throw Error(`Review fix assertions failed: ${JSON.stringify(checks)}`);
+    Object.assign(checks, await win.webContents.executeJavaScript(`(async()=>{
+      const input=document.getElementById('copywritingNewInput');
+      input.value='😀'.repeat(2001);document.getElementById('copywritingAddBtn').click();
+      const oversizedDraftPreserved=[...input.value].length===2001;
+      const draft='验收<&> "😀"\\n多行';input.value=draft;
+      const copy=await Copywriting.flush();
+      const editorRoundTrip=copy.contents.at(-1)===draft&&(await window.api.config.get('copywriting')).contents.at(-1)===draft;
+      document.querySelector('.copy-item[data-idx="'+(copy.contents.length-1)+'"]').click();
+      await Copywriting.flush();
+      document.querySelector('input[name="source"][value="local"]').click();
+      document.getElementById('localIdList').value='11111\\n11111';
+      document.getElementById('delayMin').value='0';document.getElementById('delayMax').value='0';document.getElementById('sendLimit').value='1';
+      await window.api.config.set('settings',{executionMode:'demo'});
+      const originalConfirm=Dialog.confirm;let confirmations=0;
+      Dialog.confirm=async()=>{confirmations++;await new Promise(resolve=>setTimeout(resolve,120));return false;};
+      const button=document.getElementById('taskPrivateStart');button.click();button.click();
+      const cancelDeadline=Date.now()+3000;
+      while(button.disabled){if(Date.now()>cancelDeadline)throw Error('Preparation did not settle');await new Promise(resolve=>setTimeout(resolve,30));}
+      const oneConfirmation=confirmations===1;
+      Dialog.confirm=async()=>true;button.click();
+      const runDeadline=Date.now()+3000;let status;
+      do{status=await window.api.task.getStatus();if(status.private.stats.simulated===1&&!status.private.running)break;if(Date.now()>runDeadline)throw Error('Demo UI private flow did not finish');await new Promise(resolve=>setTimeout(resolve,30));}while(true);
+      Dialog.confirm=originalConfirm;await window.api.config.set('settings',{executionMode:'android'});await Settings.refresh();
+      return {oversizedDraftPreserved,editorRoundTrip,oneConfirmation,demoPrivateLimit:status.private.stats.simulated===1&&status.private.stats.ok===0};
+    })()`));
+    if (!checks.oversizedDraftPreserved || !checks.editorRoundTrip || !checks.oneConfirmation || !checks.demoPrivateLimit)
+      throw Error(`Customer UI assertions failed: ${JSON.stringify(checks)}`);
     for (const view of ['ranking', 'rules', 'task', 'copywriting', 'blacklist', 'settings']) {
       await win.webContents.executeJavaScript(`document.querySelector('.nav-item[data-view="${view}"]').click()`);
       const active = await win.webContents.executeJavaScript(`document.querySelector('.nav-item.active')?.dataset.view`);

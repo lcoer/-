@@ -8,12 +8,18 @@ function validateConfigChange(key, value) {
     return error('INVALID_CONFIG');
   if (key === 'settings' && !['android', 'demo'].includes(value.executionMode))
     return error('INVALID_EXECUTION_MODE');
+  if (key === 'settings' && value.senderAccountUid != null &&
+      (typeof value.senderAccountUid !== 'string' || (value.senderAccountUid !== '' && !/^\d{1,32}$/.test(value.senderAccountUid))))
+    return error('INVALID_SENDER_ACCOUNT: 发送账号 UID 应为纯数字');
   if (key === 'collection' && (!['single', 'multi'].includes(value.scope) || !Number.isInteger(value.maxRooms) || value.maxRooms < 1 || value.maxRooms > 30 || !Number.isInteger(value.maxPages) || value.maxPages < 1 || value.maxPages > 12))
     return error('INVALID_COLLECTION_CONFIG');
   if (key === 'collection' && value.maxProfiles != null && (!Number.isInteger(value.maxProfiles) || value.maxProfiles < 0 || value.maxProfiles > 12))
     return error('INVALID_COLLECTION_CONFIG');
   if (key === 'copywriting' && (!Array.isArray(value.contents) || value.contents.some(t => typeof t !== 'string') || !['random', 'select', 'mediaonly'].includes(value.mode)))
     return error('INVALID_COPYWRITING');
+  // Match the Unicode character limit enforced by task-policy and the editor.
+  if (key === 'copywriting' && value.contents.some(t => [...t].length > 2000))
+    return error('CONTENT_TOO_LONG: 私信文案最多 2000 个字符');
   if (key === 'rules') {
     if (!Number.isFinite(value.delayMin) || !Number.isFinite(value.delayMax) || value.delayMin < 0 || value.delayMax < value.delayMin || value.delayMax > 86400)
       return error('INVALID_DELAY');

@@ -2,6 +2,50 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openConversation, typeAndSend } from '../src/android-ui.mjs';
 import { rejectedRow } from './fixtures/send-rejection.cjs';
+
+test('unknown bridge send dispatch is not retried by coordinate tap', async () => {
+ let value='',calls=0,taps=0;
+ const adb={tap:async()=>taps++,dumpUi:async()=>({nodes:[{shortId:'input_message',text:value},{shortId:'iv_send'}]})};
+ const r=await typeAndSend(adb,'hello',{setText:async text=>{value=text;return {ok:true};},clickSend:async()=>{calls++;return {ok:false};}});
+ assert.equal(r.outcome,'unconfirmed');assert.equal(calls,1);assert.equal(taps,0);
+});
+
+test('bridge send exception remains uncertain without coordinate fallback', async () => {
+ let value='',calls=0;
+ const adb={tap:async()=>{throw Error('unexpected fallback');},dumpUi:async()=>({nodes:[{shortId:'input_message',text:value},{shortId:'iv_send'}]})};
+ const r=await typeAndSend(adb,'hello',{setText:async text=>{value=text;return {ok:true};},clickSend:async()=>{calls++;throw Error('TRANSPORT_LOST');}});
+ assert.equal(r.outcome,'unconfirmed');assert.equal(r.reason,'POST_CLICK_UNCERTAINTY');assert.equal(calls,1);
+});
+
+test('bridge input waits for cached clear and full text snapshots without reinjection', async () => {
+ let phase='initial',reads=0,value='draft',clicked=false;const injections=[];
+ const adb={tap:async()=>{clicked=true;},dumpUi:async()=>{
+  let visible=value;
+  if(phase==='clear'&&++reads<=2)visible='draft';
+  if(phase==='type'&&++reads<=2)visible='请输入消息...';
+  return {nodes:[{shortId:'input_message',text:clicked?'':visible},{shortId:'iv_send'},...(clicked?[{shortId:'rc_text',text:'hello'}]:[])]};
+ }};
+ const r=await typeAndSend(adb,'hello',{sendTimeout:10,setText:async text=>{injections.push(text);value=text;phase=text?'type':'clear';reads=0;return {ok:true};}});
+ assert.equal(r.outcome,'confirmed_ui');assert.deepEqual(injections,['','hello']);
+});
+
+test('cancellation during cached clear wait does not type or send', async () => {
+ const controller=new AbortController();let clears=0,taps=0,reads=0;
+ const adb={signal:controller.signal,tap:async()=>taps++,dumpUi:async()=>{if(clears&&++reads===2)controller.abort();return {nodes:[{shortId:'input_message',text:'draft'},{shortId:'iv_send'}]};}};
+ const r=await typeAndSend(adb,'hello',{setText:async()=>{clears++;return {ok:true};}});
+ assert.equal(r.outcome,'cancelled');assert.equal(clears,1);assert.equal(taps,0);
+});
+
+test('strict send confirmation rejects incoming exact text and confirms stable outgoing proof', async () => {
+ for (const incoming of [true,false]) {
+  let value='',clicked=false;
+  const row=rejectedRow().filter(n=>n.shortId!=='rc_errorhint').map(n=>incoming&&n.shortId==='rc_right_portrait'?{...n,shortId:'rc_left_portrait'}:n);
+  const adb={tap:async()=>{throw Error('coordinate fallback');},dumpUi:async()=>({nodes:[{shortId:'input_message',text:clicked?'':value},{shortId:'iv_send'},...(clicked?row:[])]})};
+  const r=await typeAndSend(adb,'hello',{setText:async text=>{value=text;return {ok:true};},clickSend:async()=>{clicked=true;return {ok:true};},requireOutgoingProof:true,sendTimeout:incoming?10:4000});
+  assert.equal(r.outcome,incoming?'unconfirmed':'confirmed_ui');
+  if(!incoming){assert.ok(r.evidence.outgoingConfirmation.stableMs>=1200);assert.ok(r.evidence.outgoingConfirmation.snapshots>=2);}
+ }
+});
 test('conversation matching never selects a partial nickname', async () => {
   let taps = 0;
   const adb = { dumpUi: async () => ({nodes:[{shortId:'item_layout_conversation_list',x:0,y:0,x2:100,y2:100},{shortId:'tv_nickname',text:'Alice other',x:1,y:1,x2:90,y2:90}]}), tap:async()=>taps++,swipe:async()=>{} };

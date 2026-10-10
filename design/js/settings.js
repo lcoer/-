@@ -28,6 +28,9 @@ const Settings = (function () {
     setText('setRunMode', demo ? '演示（不发送，不计入真实统计）' : (connected ? '真实模式' : '真实模式 · 设备未连接'));
     const modeSelect = document.getElementById('executionMode');
     if (modeSelect) modeSelect.value = demo ? 'demo' : 'android';
+    const settings = await api.config.get('settings') || {};
+    const accountInput = document.getElementById('senderAccountUid');
+    if (accountInput && document.activeElement !== accountInput) accountInput.value = settings.senderAccountUid || '';
     setText('setVersion', info.version || '--');
 
     // 侧边栏 + 标题栏徽标
@@ -46,7 +49,8 @@ const Settings = (function () {
       badge.textContent = demo ? '演示模式' : '设备未连接';
       badge.classList.remove('live');
     }
-    if (info.recoveryRequired) setHint('发送记录从备份恢复，可能缺少最近的发送。当前已禁止发送，请先核对数据文件并恢复完整记录。');
+    if (info.recoveryRequired) setHint('发送历史需要恢复核验，可能缺少最近的发送记录。当前已禁止发送，请先核对原始数据及备份，恢复完整记录。');
+    else if (info.collectionRecoveryRequired) setHint('采集历史已从有效备份恢复，最近一次采集可能不完整。请保留原文件并核对名单；正常发送记录和去重仍然有效。');
     return info;
   }
 
@@ -56,6 +60,19 @@ const Settings = (function () {
       const res = await api.config.set('settings', { executionMode: e.target.value });
       toast(res?.ok ? '执行模式已保存' : (res?.reason || '保存失败'), res?.ok ? 'ok' : 'error');
       await refresh();
+    });
+    document.getElementById('setSenderAccountBtn').addEventListener('click', async () => {
+      const button = document.getElementById('setSenderAccountBtn');
+      const uid = document.getElementById('senderAccountUid').value.trim();
+      if (uid && !/^\d{1,32}$/.test(uid)) { toast('发送账号 UID 应为纯数字', 'error'); return; }
+      button.disabled = true;
+      try {
+        const settings = await api.config.get('settings') || { executionMode: 'android' };
+        const res = await api.config.set('settings', { executionMode: settings.executionMode, senderAccountUid: uid });
+        toast(res?.ok ? '发送账号已保存' : (res?.reason || '保存失败'), res?.ok ? 'ok' : 'error');
+        await refresh();
+      } catch (e) { toast(`保存失败: ${e.message}`, 'error'); }
+      finally { button.disabled = false; }
     });
     if (!info.emulatorConnected && !info.recoveryRequired) {
       setHint('<span class="material-symbols-outlined">lightbulb</span>'
@@ -76,7 +93,7 @@ const Settings = (function () {
         toast(`模拟器已连接(${res.serial})`, 'ok');
         if (!res.bridgeReady) {
           setHint('<span class="material-symbols-outlined">warning</span>'
-            + '模拟器已连接,但<b>无障碍桥接未就绪</b>——房间页(欢迎/打call)可能读不到控件。'
+            + '模拟器已连接,但<b>无障碍桥接未就绪</b>——房间页可能读不到控件。'
             + '请点「安装/启用无障碍桥接」修复。');
           if (res.protocolError) toast(res.protocolError, 'error');
         }

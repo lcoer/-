@@ -1,5 +1,5 @@
 // electron/ipc/task-ipc.js - 任务控制 IPC
-// 私聊 / 自动欢迎 / 自动打call 三任务的启停与状态查询
+// 私聊任务的启停与状态查询
 
 const { ipcMain } = require('electron');
 const taskRunner = require('../services/task-runner');
@@ -19,7 +19,9 @@ function registerTaskIpc(ctx) {
   handle('task:status', () => taskRunner.getStatus());
   handle('task:pending', () => ({ ok: true, results: dataStore.getPendingResults() }));
   handle('task:resolvePending', async (_e, request) => taskRunner.withDeviceOperation('reviewPending', async () => {
-    const record = dataStore.resolvePending({ ...request, machineCode: dataStore.getMachineCode() });
+    // Historical records retain their original sender scope, including the
+    // legacy scope. Resolving them must not reassign them to the active account.
+    const record = dataStore.resolvePending(request || {});
     return { ok: true, outcome: record.outcome };
   }));
 

@@ -51,6 +51,7 @@ const Copywriting = (function () {
     const input = document.getElementById('copywritingNewInput');
     const text = input.value.trim();
     if (!text) return;
+    if ([...text].length > 2000) throw Error('私信文案最多 2000 个字符，请缩短后保存');
     cfg.contents.push(text);
     input.value = '';
     render();
@@ -104,6 +105,7 @@ const Copywriting = (function () {
       if (del) {
         const i = Number(del.dataset.del);
         cfg.contents.splice(i, 1);
+        if (i < cfg.selectedIndex) cfg.selectedIndex--;
         if (cfg.selectedIndex >= cfg.contents.length) cfg.selectedIndex = 0;
         render(); save(false);
         return;
@@ -119,15 +121,15 @@ const Copywriting = (function () {
 
     // 新增
     function addItem() {
-      const input = document.getElementById('copywritingNewInput');
-      const v = input.value.trim();
-      if (!v) return;
-      cfg.contents.push(v);
-      input.value = '';
-      render(); save(false);
+      try {
+        includeDraft();
+        save(false);
+      } catch (error) { toast(error.message, 'error'); }
     }
     document.getElementById('copywritingAddBtn').addEventListener('click', addItem);
-    document.getElementById('copywritingNewInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') addItem(); });
+    document.getElementById('copywritingNewInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); addItem(); }
+    });
 
     document.getElementById('copySaveBtn').addEventListener('click', () => save(true));
 

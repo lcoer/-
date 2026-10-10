@@ -24,6 +24,7 @@ export class CollectionController {
     this.memberScanner = opts.memberScanner || scanRoomMembers;
     this.userResolver = opts.userResolver || resolveVisibleRoomUsers;
     this.resolvedHintCache = new Map();
+    this.profileAttempts = new Map();
     this.navigator = opts.navigator || null;
     this.clock = opts.clock || Date.now;
     this.stopped = true;
@@ -239,11 +240,14 @@ export class CollectionController {
         await this._publish(visibleUsers, meta);
       }
     }
-    if (this.opts.resolveUsers !== false && this.driver.bridge && visibleUsers.some(u => !u.uidReal && u.seenFrom === 'wheat')) {
-      const resolved = await this.userResolver(this.driver, visibleUsers, { ...meta, signal: this.signal, maxProfiles: this.opts.maxProfiles ?? 6, maxDurationMs: 10000, knownMappings: this.resolvedHintCache,
+    if (this.opts.resolveUsers !== false && this.driver.bridge && visibleUsers.some(u => !u.uidReal || !['male','female'].includes(u.sex))) {
+      const profileLimit=this.opts.maxProfiles??6;
+      const resolved = await this.userResolver(this.driver, visibleUsers, { ...meta, signal: this.signal, maxProfiles:profileLimit, maxDurationMs:Math.min(30000,5000+profileLimit*4000), knownMappings: this.resolvedHintCache,attemptHistory:this.profileAttempts,
         onLog: (l, m) => this.log(l, m), onUser: async (record) => {
           await this._publish([record], meta);
-          this.resolvedHintCache.set(record.resolvedFrom, { uid: record.uid, at: this.clock() });
+          const cached={uid:record.uid,sex:record.sex||'unknown',at:this.clock(),retryAfter:this.clock()+10000};
+          this.resolvedHintCache.set(record.resolvedFrom,cached);
+          this.resolvedHintCache.set(record.uid,cached);
         } });
       this.stats.profilesRead += resolved.profilesRead;
       this.stats.profileStatus = resolved.reason;

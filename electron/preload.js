@@ -57,12 +57,12 @@ contextBridge.exposeInMainWorld('api', {
     status: () => ipcRenderer.invoke('collect:status'),
   },
 
-  // ===== 任务控制(私聊/欢迎/打call) =====
+  // ===== 任务控制(私聊) =====
   task: {
-    // 启动任务 name:'private'|'welcome'|'call'
+    // 启动任务 name:'private'
     start: (name, config) => ipcRenderer.invoke('task:start', name, config),
     stop: (name) => ipcRenderer.invoke('task:stop', name),
-    // 查询所有任务状态 → { private:{running,stats}, welcome:..., call:... }
+    // 查询所有任务状态 → { private:{running,stats}, collect:..., resolve:... }
     getStatus: () => ipcRenderer.invoke('task:status'),
     getPending: () => ipcRenderer.invoke('task:pending'),
     resolvePending: (request) => ipcRenderer.invoke('task:resolvePending', request),

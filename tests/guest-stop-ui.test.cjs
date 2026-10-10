@@ -16,11 +16,11 @@ function setup(overrides = {}) {
   let current = { running: false, state: 'stopped', stats: {}, source: 'room' }, owner = null;
   const api = {
     config: { set: async () => ({ ok: true }) },
-    portal: { getRecords: async () => ({ ok: true, records: [] }), getStats: async () => ({ ok: true, data: {} }) },
+    portal: { getRecords: async () => ({ ok: true, records: [] }), getStats: async () => ({ ok: true, data: {} }), ...overrides.portal },
     collect: { status: async () => ({ ok: true, ...current.stats, ...current }), start: async () => ({ ok: true }), stop: async () => ({ ok: true }), ...overrides.collect },
     task: { getStatus: async () => ({ collect: current, deviceOwner: owner }), ...overrides.task },
   };
-  const context = vm.createContext({ window: { api }, document: { getElementById: element }, console, fmtNum: n => n || 0, debounce: callback => callback, escapeHtml: s => s, toast: msg => errors.push(msg), alert: msg => errors.push(msg) });
+  const context = vm.createContext({ window: { api }, document: { getElementById: element }, console, fmtNum: n => n || 0, debounce: callback => callback, escapeHtml: s => s, toast: msg => errors.push(msg), alert: msg => errors.push(msg), confirm: () => true });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../design/js/guest-view.js'), 'utf8') + '\n globalThis.view = GuestView;', context);
   return { element, errors, click: () => element('guestCollectBtn').listeners.click(), view: context.view,
     status(status, nextOwner = status.running ? { owner: 'collect' } : null) { current = status; owner = nextOwner; context.view.onTaskStatus({ collect: current, deviceOwner: owner }); } };
@@ -119,4 +119,32 @@ test('an older backend query cannot overwrite a newer stopped event', async () =
   query.resolve({ ok: true, statusRevision: 2, running: true, state: 'stopping' }); await refreshing;
   assert.equal(h.element('guestCollectBtnText').textContent, '开始实时采集');
   assert.equal(h.element('guestCollectBtn').disabled, false);
+});
+
+test('latest record query wins and displayed count uses full filtered total', async () => {
+  const old = deferred(), fresh = deferred(); let calls = 0;
+  const h = setup({ portal: { getRecords: () => ++calls === 1 ? old.promise : fresh.promise } });
+  h.view.onStream({type:'batch',payload:{added:1}});
+  h.view.onStream({type:'batch',payload:{added:1}});
+  fresh.resolve({ok:true, records:[{uid:'22222',nickname:'fresh'}],total:60}); await tick();
+  old.resolve({ok:true,records:[{uid:'11111',nickname:'old'}],total:1}); await tick();
+  assert.match(h.element('guestGrid').innerHTML,/fresh/);
+  assert.doesNotMatch(h.element('guestGrid').innerHTML,/old/);
+  assert.equal(h.element('guestNavCount').textContent,60);
+});
+
+test('live record events reload stored page instead of inserting duplicate or wrong-date payloads', async () => {
+  let calls = 0;
+  const h = setup({portal:{getRecords:async()=>{ calls++; return {ok:true,records:[{uid:'11111',nickname:'stored'}],total:1}; }}});
+  h.view.onStream({type:'record',payload:{uid:'22222',nickname:'wrong date'}});
+  h.view.onStream({type:'record',payload:{uid:'22222',nickname:'wrong date'}});
+  await tick();
+  assert.equal(calls,2); assert.match(h.element('guestGrid').innerHTML,/stored/);
+  assert.doesNotMatch(h.element('guestGrid').innerHTML,/wrong date/);
+});
+
+test('clear failure is visible and clear button becomes usable again', async () => {
+  const h=setup({portal:{clearDemo:async()=>{throw Error('disk failed');}}});
+  await h.element('guestClearBtn').listeners.click();
+  assert.match(h.errors.at(-1),/disk failed/); assert.equal(h.element('guestClearBtn').disabled,false);
 });

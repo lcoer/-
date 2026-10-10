@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { proveSendRejection, isDefinitiveSendRejection, hasUncertainSendFailure } from '../src/send-proof.cjs';
+import { proveSendRejection, isDefinitiveSendRejection, hasUncertainSendFailure, proveOutgoingConfirmation } from '../src/send-proof.cjs';
 import { n, rejectedRow } from './fixtures/send-rejection.cjs';
 test('known rejection is bound to the only new outgoing exact message row', () => {
   const proof = proveSendRejection([], rejectedRow(), 'hello');
@@ -31,6 +31,16 @@ test('rejection validation requires current recipient and complete geometric pro
 
 const move = (nodes, dy) => nodes.map(n => ({ ...n, y: n.y + dy, y2: n.y2 + dy }));
 const freshRow = () => move(rejectedRow('hello').filter(n => n.shortId !== 'rc_errorhint'), 400);
+
+test('outgoing confirmation requires one appended exact body and its outgoing row', () => {
+  const row = rejectedRow().filter(n => n.shortId !== 'rc_errorhint');
+  assert.equal(proveOutgoingConfirmation([], row, 'hello').kind, 'new_outgoing_row_confirmation');
+  assert.equal(proveOutgoingConfirmation([], row.map(n => n.shortId === 'rc_right_portrait' ? {...n,shortId:'rc_left_portrait'} : n), 'hello'), null);
+  assert.equal(proveOutgoingConfirmation(row, row, 'hello'), null);
+  assert.equal(proveOutgoingConfirmation([], [...row,n('rc_sending','',100,450,120,470)], 'hello'), null);
+  assert.equal(proveOutgoingConfirmation([], rejectedRow(), 'hello'), null);
+  assert.equal(proveOutgoingConfirmation([n('rc_text','old',0,0,20,20)],row,'hello'),null);
+});
 test('old failure can move geometrically while the new successful row is confirmed', () => {
   const before = rejectedRow('old');
   const after = [...move(before, 40), ...freshRow()];
