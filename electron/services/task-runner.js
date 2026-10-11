@@ -114,6 +114,7 @@ function createTaskRunner(deps = {}) {
   }
   async function readyDriver(t) {
     // The chosen serial stays fixed for the run; readiness checks never send messages.
+    if(t.name==='collect'){t.stats.phase='connecting';log('collect','info','正在连接模拟器并检查运行环境');emitStatus();}
     const signal = t.controller.signal, info = await clientManager.ensureClient({ signal, onLog: (l, m) => log('system', l, m) });
     cancelled(signal);
     if (!info || info.mode !== 'android' || !info.serial)
@@ -122,6 +123,7 @@ function createTaskRunner(deps = {}) {
     t.deviceInfo = info;
     cancelled(signal);
     drv.setSignal?.(signal);
+    if(t.name==='collect'){t.stats.phase='checking_environment';log('collect','info','正在检查应用和采集桥接服务');emitStatus();}
     await drv.ensureReady();
     if (drv.bridge?.ensureCompatible) {
       const handshake = await drv.bridge.ensureCompatible({ signal });
@@ -129,6 +131,7 @@ function createTaskRunner(deps = {}) {
     }
     cancelled(signal);
     t.driver = drv;
+    if(t.name==='collect'){t.stats.phase='preparing_collection';emitStatus();}
     return drv;
   }
   function launch(name, config, initialize, execute) {
@@ -337,9 +340,12 @@ function createTaskRunner(deps = {}) {
       collector = await createCollector(drv, {
         intervalMs, scope, maxRooms, maxPages, maxProfiles, roomName: opts.roomName || null, signal: t.controller.signal,
         ...(dataStore.getCollectionCoverage?.() || {}),
-        onProgress: () => {
-          if (!t.controller.signal.aborted)
+        onProgress: progress => {
+          if (!t.controller.signal.aborted) {
+            if(progress?.waitingForNextCycle)t.stats.phase=progress.navigationStatus==='retry'?'waiting_for_room':'waiting_cycle';
+            else if(progress?.room)t.stats.phase='collecting';
             emitStatus();
+          }
         },
         onLog: (l, m) => log('collect', l, m), onUsers: (users, meta) => {
           if (!t.controller.signal.aborted) {
@@ -347,8 +353,11 @@ function createTaskRunner(deps = {}) {
           }
         },
         onRoom: room => {
-          if (!t.controller.signal.aborted)
+          if (!t.controller.signal.aborted) {
+            t.stats.phase='collecting';
             dataStore.reportCollectRoom?.(room);
+            emitStatus();
+          }
         }, onError: msg => {
           if (!t.controller.signal.aborted)
             dataStore.reportCollectError?.(msg);
@@ -359,10 +368,16 @@ function createTaskRunner(deps = {}) {
       t.cleanup = () => currentCollector.stop();
       cancelled(t.controller.signal);
       dataStore.setSource('room');
-      await currentCollector.start({ intervalMs, signal: t.controller.signal });
-      return currentCollector;
-    }, async (t, c) => {
+      return {collector:currentCollector,intervalMs};
+    }, async (t, {collector:c,intervalMs}) => {
       try {
+        cancelled(t.controller.signal);
+        t.stats.phase='entering_room';
+        log('collect','info','采集引擎已启动，正在等待确认进入房间；尚未采集到用户时不会生成数据');
+        emitStatus();
+        const started=await c.start({intervalMs,signal:t.controller.signal});
+        cancelled(t.controller.signal);
+        if(started?.ok===false)throw Error(started.reason||'COLLECT_ENGINE_START_FAILED');
         await untilAbort(t.controller.signal);
       }
       finally {
@@ -375,7 +390,7 @@ function createTaskRunner(deps = {}) {
   }
   function getCollectStatus() {
     const t = tasks.get('collect');
-    return { ok: true, ...(collector && collectorRunId === t.runId ? collector.getStatus() : { rounds: 0 }), running: t.running, state: t.state, statusRevision, source: dataStore.getStatus().source };
+    return { ok: true, ...(collector && collectorRunId === t.runId ? collector.getStatus() : { rounds: 0 }), phase:t.stats.phase, error:t.error||null,running: t.running, state: t.state, statusRevision, source: dataStore.getStatus().source };
   }
   async function resolveNicknames(uids = []) {
     let run;

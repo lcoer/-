@@ -194,6 +194,8 @@ const GuestView = (function () {
     const coverage = { empty: '成员名单显示暂无数据，已降级为公屏与麦位；多房间模式会继续下一房间。', unavailable: '未找到可用成员列表，读取公屏与麦位线索。', partial: '成员列表只完成部分扫描，保留已读数据并继续遍历。', complete: '本房间成员列表已扫描；真实 UID 与仅昵称记录分别统计。' };
     if (st.memberStatus) document.getElementById('collectCoverageHint').textContent = coverage[st.memberStatus] || '正在扫描公开可见用户；本次新 UID 已排除历史已采集 ID。';
     if (st.waitingForNextCycle) document.getElementById('collectCoverageHint').textContent = st.navigationStatus === 'retry' ? '暂未确认更多可访问房间，正在等待重试。' : '已达到本轮访问范围，正在等待下一轮。';
+    const preparation={connecting:'正在连接模拟器，采集尚未开始。',checking_environment:'正在检查应用与桥接服务，采集尚未开始。',preparing_collection:'正在准备采集引擎，尚未开始进入房间。',entering_room:'采集引擎已启动，正在等待确认进入房间；尚未开始采集用户。',waiting_for_room:'尚未确认可访问房间，正在等待重试；不会生成虚拟数据。'};
+    if(state.collecting && preparation[st.phase])document.getElementById('collectCoverageHint').textContent=preparation[st.phase];
     if (!state.collecting) document.getElementById('collectCoverageHint').textContent = st.state === 'failed' ? `采集失败：${st.error || '请查看控制台日志'}` : '采集已停止，已采集记录已保留。';
     updateLiveBadge({ room: st.room });
   }
@@ -210,6 +212,7 @@ const GuestView = (function () {
     if (liveBox) liveBox.classList.toggle('is-real', real);
     let txt = real ? (state.collecting ? '采集中' : '房间记录 · 采集未运行') : '演示数据';
     if (real && state.collecting && extra && extra.room) txt = `采集中 · ${extra.room}`;
+    if(real && state.collecting && ['connecting','checking_environment','preparing_collection','entering_room','waiting_for_room'].includes(latestCollectStatus.phase))txt=latestCollectStatus.phase==='entering_room'||latestCollectStatus.phase==='waiting_for_room'?'采集引擎运行 · 等待进入房间':'采集环境准备中';
     if (real && extra && extra.error) txt = '采集异常(见日志)';
     if (liveText) liveText.textContent = txt;
     const statusText = document.getElementById('portalLiveState');

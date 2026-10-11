@@ -79,7 +79,12 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
       attemptHistory.set(attemptKey(user),++ordinal);
       const r = bounds(seats[0]);
       throwIfAborted(signal);
-      const clicked = await driver.bridge.tapByCoord((r.x + r.x2) / 2, (r.y + r.y2) / 2, { signal, timeout: Math.min(remaining(), 1500) });
+      let clicked;
+      if(typeof driver.bridge.clickText==='function') {
+        const matches=nodes.filter(n=>text(n).includes(user.nickname));
+        if(matches.length!==1||matches[0]!==seats[0])continue;
+        clicked=await driver.bridge.clickText(user.nickname,{signal,timeout:Math.min(remaining(),1500)});
+      }else clicked=await driver.bridge.tapByCoord((r.x + r.x2) / 2, (r.y + r.y2) / 2, { signal, timeout: Math.min(remaining(), 1500) });
       throwIfAborted(signal);
       if (!clicked?.ok)
         continue;

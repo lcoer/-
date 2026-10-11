@@ -6,6 +6,18 @@ const root=(y=0)=>n('','',{packageName:'com.sybl.voiceroom',x:0,y,x2:1080,y2:192
 const room=[root(),n('tv_room_name','Test'),n('tv_room_code','ID:9277'),n('tv_wheat_name','A')];
 const card=(nickname='A',code='12345678')=>[root(770),n('rv_top_bg','',{x:0,y:770,x2:1080,y2:1250}),n('tv_nickname',nickname,{x:461,y:1363,x2:613,y2:1430}),n('tv_user_code',code,{x:84,y:1280,x2:212,y2:1319}),n('tv_user_operate_item','私聊',{y:1500,y2:1600})];
 const users=[{uid:'n123',uidReal:false,nickname:'A'}];
+test('a unique observed nickname opens through its clickable text action',async()=>{
+ const d=driver([room,card(),card(),room]);let textActions=0;
+ d.bridge.clickText=async value=>{assert.equal(value,'A');textActions++;return {ok:true};};
+ const result=await resolveVisibleRoomUsers(d,users);
+ assert.equal(result.resolved.length,1);assert.equal(textActions,1);assert.equal(d.taps.length,0);assert.equal(d.backs,1);
+});
+test('an ambiguous nickname text action is not dispatched or retried by coordinates',async()=>{
+ const d=driver([[...room,n('content','欢迎A')]]);let actions=0;
+ d.bridge.clickText=async()=>{actions++;return {ok:true};};
+ const result=await resolveVisibleRoomUsers(d,users);
+ assert.equal(result.resolved.length,0);assert.equal(actions,0);assert.equal(d.taps.length,0);
+});
 test('a timed-out profile tap closes only a freshly recognized card',async t=>{
  let now=0;t.mock.method(Date,'now',()=>now);
  const d=driver([room,card(),room]);

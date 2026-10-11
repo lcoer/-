@@ -35,6 +35,17 @@ test('late start acknowledgement cannot overwrite a stopped status', async () =>
   assert.equal(h.element('guestCollectBtnText').textContent, '开始实时采集');
   assert.equal(h.element('guestCollectBtn').disabled, false);
 });
+test('collection distinguishes environment preparation and engine waiting from actual user scanning',()=>{
+ const h=setup();
+ h.status({running:true,state:'starting',stats:{phase:'connecting',source:'room'}});
+ assert.match(h.element('collectCoverageHint').textContent,/采集尚未开始/);
+ h.status({running:true,state:'running',stats:{phase:'entering_room',rounds:0}});
+ assert.match(h.element('collectCoverageHint').textContent,/等待确认进入房间/);
+ assert.match(h.element('portalLiveText').textContent,/等待进入房间/);
+ h.status({running:true,state:'running',stats:{phase:'collecting',room:'fixture',memberStatus:'complete'}});
+ assert.match(h.element('collectCoverageHint').textContent,/已扫描/);
+ assert.match(h.element('portalLiveText').textContent,/fixture/);
+});
 
 test('stop remains disabled when an earlier start response arrives during cancellation', async () => {
   const start = deferred(), stop = deferred();

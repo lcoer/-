@@ -262,6 +262,22 @@ test('collector startup cancellation stops constructed collector before releasin
   finishStart({ok:true});await starting;await stopping;
   assert.equal(stopped,1);assert.equal(runner.getStatus().deviceOwner,null);
 });
+test('collection acknowledges engine startup before first room scan settles and cancellation prevents data writes',async()=>{
+ let scanStarted=false,abortScan,stops=0,writes=0;
+ const {runner}=setup({store:{ingestRealRecords:()=>{writes++;}},createCollector:async(_driver,options)=>({
+  start:async({signal})=>{scanStarted=true;await new Promise(resolve=>{abortScan=resolve;signal.addEventListener('abort',resolve,{once:true});});options.onUsers([{uid:'12345'}],{});return {ok:true};},
+  stop:async()=>{stops++;abortScan?.();},getStatus:()=>({rounds:0,roomsVisited:0})})});
+ const response=await runner.startCollect({intervalMs:1000});assert.equal(response.ok,true);assert.equal(scanStarted,true);
+ assert.equal(runner.getStatus().collect.state,'running');assert.equal(runner.getStatus().collect.stats.phase,'entering_room');
+ assert.equal(runner.getCollectStatus().phase,'entering_room');
+ await runner.stopCollect();assert.equal(stops,1);assert.equal(writes,0);assert.equal(runner.getStatus().deviceOwner,null);
+});
+test('collection environment failure never starts engine and resets running state',async()=>{
+ let creates=0;
+ const {runner}=setup({driver:{ensureReady:async()=>{throw Error('BRIDGE_NOT_ENABLED');}},createCollector:async()=>{creates++;}});
+ const response=await runner.startCollect();assert.equal(response.ok,false);assert.match(response.reason,/BRIDGE_NOT_ENABLED/);
+ assert.equal(creates,0);assert.equal(runner.getStatus().collect.running,false);assert.equal(runner.getStatus().collect.state,'failed');assert.equal(runner.getStatus().deviceOwner,null);
+});
 test('dispatch intent followed by returned cancellation remains unconfirmed',async()=>{
   const {runner,outcomes}=setup({driver:{sendPrivateMessage:async(n,t,opts)=>{await opts.onBeforeSend();return {outcome:'cancelled'};}}});
   await runner.start('private',cfg());await runner.waitForIdle();
