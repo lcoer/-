@@ -27,13 +27,15 @@ function harness(overrides = {}) {
   const api = { list: async () => ({ ok: true, ...settings, settings, users, counts: { high: 2, low: 1, unclassified: 0, total: 3 } }),
     assignments: async () => ({ ok: true, settings, assignments: [] }),
     assign: async payload => { writes.push(payload); return { ok: true, assignment: {} }; }, ...overrides };
-  const context = vm.createContext({ window: { api: { recommendation: api } }, document: { getElementById: get },
+  let statusListener;
+  const task={onStatus:listener=>{statusListener=listener;},stop:async()=>({ok:true})};
+  const context = vm.createContext({ window: { api: { recommendation: api, task } }, document: { getElementById: get },
     toast: text => notices.push(text), crypto: { randomUUID: () => 'request-1' } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../design/js/utils.js'), 'utf8'), context);
   // Keep toast independent of a real document while using the actual HTML escaping helper.
   vm.runInContext('toast = text => notices.push(text)', Object.assign(context, { notices }));
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../design/js/recommendation-view.js'), 'utf8') + '\nthis.view = RecommendationView;', context);
-  return { get, notices, writes, view: context.view, api };
+  return { get, notices, writes, view: context.view, api, task, status:state=>statusListener?.(state) };
 }
 
 test('推荐列表默认财富 54 分类，隐藏等级展示，按可见分组选中且转义昵称', async () => {
@@ -91,4 +93,17 @@ test('修改未保存阈值禁止分配，空值/超长Unicode拒绝，变更分
   h.get('recommendSelectAllBtn').fire('click');
   await h.view.saveClassification();
   assert.equal(h.get('recommendSelectedCount').textContent, '已选 0 人');
+});
+test('补查按钮阻止重复启动、显示进度、停止调用resolve并刷新',async()=>{
+ let resolve,calls=0,stops=0;
+ const h=harness({enrich:async()=>{calls++;return new Promise(done=>{resolve=done;});}});await h.view.init();
+ h.task.stop=async name=>{assert.equal(name,'resolve');stops++;return {ok:true};};
+ const first=h.view.enrich();await h.view.enrich();assert.equal(calls,1);
+ assert.equal(h.get('recommendEnrichBtn').disabled,true);assert.equal(h.get('recommendEnrichStopBtn').disabled,false);
+ h.status({resolve:{running:true,stats:{total:10,processed:2,enriched:1,currentUid:'123'}}});
+ assert.match(h.get('recommendEnrichStatus').textContent,/2\/10/);
+ await h.get('recommendEnrichStopBtn').fire('click');assert.equal(stops,1);
+ resolve({ok:false,reason:'CANCELLED'});await first;
+ assert.equal(h.get('recommendEnrichBtn').disabled,false);assert.equal(h.get('recommendEnrichStopBtn').disabled,true);
+ assert.match(h.get('recommendEnrichStatus').textContent,/已停止/);
 });

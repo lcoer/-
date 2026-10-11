@@ -245,7 +245,9 @@ export class CollectionController {
       const resolved = await this.userResolver(this.driver, visibleUsers, { ...meta, signal: this.signal, maxProfiles:profileLimit, maxDurationMs:Math.min(30000,5000+profileLimit*(typeof this.driver.readProfileLevels==='function'?8500:4000)), knownMappings: this.resolvedHintCache,attemptHistory:this.profileAttempts,
         onLog: (l, m) => this.log(l, m), onUser: async (record) => {
           await this._publish([record], meta);
-          const cached={uid:record.uid,sex:record.sex||'unknown',wealthLevel:record.wealthLevel,charmLevel:record.charmLevel,at:this.clock(),retryAfter:this.clock()+10000};
+          const prior=this.resolvedHintCache.get(record.uid)||this.resolvedHintCache.get(record.resolvedFrom)||{};
+          const cached={...prior,uid:record.uid,sex:['male','female'].includes(record.sex)?record.sex:prior.sex||'unknown',at:this.clock(),retryAfter:this.clock()+10000};
+          for(const field of ['wealthLevel','charmLevel']) if(record[field]==='?'||(Number.isInteger(record[field])&&record[field]>=0))cached[field]=record[field];
           this.resolvedHintCache.set(record.resolvedFrom,cached);
           this.resolvedHintCache.set(record.uid,cached);
         } });

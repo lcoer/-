@@ -32,11 +32,24 @@ export async function readProfileGender(driver,nodes,{expectedUid,expectedNickna
  throwIfAborted(signal);const deadline=Date.now()+Math.max(1,timeout);
  try{
   for(let attempt=0;attempt<2;attempt++){
+   // The preceding level read can outlive a profile's entrance animation. Refresh
+   // identity and the age anchor before choosing pixel coordinates, within the
+   // same deadline and capture budget.
+   throwIfAborted(signal);
+   if(!context(nodes,expectedUid,expectedNickname))return {sex:'unknown',reason:'identity_unverified'};
+   if(typeof driver.bridge?.dumpUi==='function'&&Date.now()<deadline){
+    try{
+     const refreshed=await driver.bridge.dumpUi({signal,retries:0,timeout:Math.max(1,deadline-Date.now())});throwIfAborted(signal);
+     if(!context(refreshed.nodes,expectedUid,expectedNickname))return {sex:'unknown',reason:'identity_changed'};
+     nodes=refreshed.nodes;
+    }catch(error){if(isAbortError(error)||signal?.aborted){throwIfAborted(signal);throw error;}if(attempt===0&&Date.now()<deadline)continue;return {sex:'unknown',reason:'capture_failed'};}
+   }
    throwIfAborted(signal);const current=context(nodes,expectedUid,expectedNickname);if(!current)return {sex:'unknown',reason:'identity_unverified'};
    const direct=semantic(nodes.filter(current.visible));
    if(direct.conflict)return {sex:'unknown',reason:'conflicting_symbols'};
    if(direct.sex!=='unknown')return {sex:direct.sex,evidence:{kind:'gender_badge_text',sex:direct.sex,confidence:1}};
-   if(current.icons.length>1||(!current.icons.length&&current.ages.length!==1))return {sex:'unknown',reason:'badge_unavailable'};
+   if(current.icons.length>1||current.ages.length>1)return {sex:'unknown',reason:'badge_unavailable'};
+   if(!current.icons.length&&!current.ages.length){if(attempt===0&&typeof driver.bridge?.dumpUi==='function'&&Date.now()<deadline)continue;return {sex:'unknown',reason:'badge_unavailable'};}
    if(typeof driver.adb?.screenshotBuffer!=='function'||Date.now()>=deadline)return {sex:'unknown',reason:'capture_unavailable'};
    const marker=current.icons[0]||current.ages[0],explicit=!!current.icons.length,height=marker.y2-marker.y;
    const left=Math.max(0,Math.floor(marker.x-2.2*height)),top=Math.max(0,Math.floor(marker.y-0.4*height));

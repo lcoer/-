@@ -14,6 +14,7 @@ function registerSystemIpc(ctx) {
   handle('recommendation:list', options => dataStore.getRecommendations(options));
   handle('recommendation:assign', request => dataStore.assignRecommendations(request));
   handle('recommendation:assignments', () => dataStore.getAssignments());
+  handle('recommendation:enrich', options => taskRunner.enrichRecommendations(options));
   const connect = () => taskRunner.withDeviceOperation('connect', async (signal) => {
     clientManager.reset();
     const info = await clientManager.ensureClient({ signal, onLog: (l, m) => dataStore.pushSystemLog(l, m) });

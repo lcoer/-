@@ -26,7 +26,18 @@ export function profileLevelRegion(nodes,uid,nickname){
  const visible=identity(nodes,uid,nickname);if(!visible)return null;
  const name=nodes.find(n=>id(n)==='tv_nickname'&&visible(n)),ages=nodes.filter(n=>id(n)==='tv_age'&&visible(n));
  const statuses=nodes.filter(n=>id(n)==='tv_online_status'&&visible(n));
- if(ages.length!==1||statuses.length!==1)return null;
+ if(ages.length!==1)return null;
+ if(statuses.length===0){
+  // Full public profile: levels are immediately below the verified ID/age row,
+  // before the signature. Action anchors distinguish it from own-account pages.
+  if(!['iv_chat','iv_follow','tv_sign'].every(key=>nodes.filter(n=>id(n)===key&&visible(n)).length===1))return null;
+  const root=nodes[0],age=ages[0],height=age.y2-age.y,sign=nodes.find(n=>id(n)==='tv_sign'&&visible(n));
+  const top=Math.ceil(age.y2+.4*height),bottom=Math.min(sign.y-4,Math.floor(age.y2+2.6*height));
+  if(top<=name.y2||bottom-top<12||bottom-top>150)return null;
+  const x=Math.ceil(root.x+(root.x2-root.x)*.05),x2=Math.floor(root.x+(root.x2-root.x)*.33);
+  return {x,y:top,width:x2-x,height:bottom-top};
+ }
+ if(statuses.length!==1)return null;
  const root=nodes[0],height=ages[0].y2-ages[0].y;
  const top=Math.max(name.y2+4,Math.floor(statuses[0].y-2.5*height)),bottom=Math.floor(statuses[0].y-.35*height);
  if(bottom-top<12||bottom-top>150)return null;
@@ -45,27 +56,38 @@ export async function windowsLevelOcr(png,region,{signal,timeout=3000}={}){
   return JSON.parse(stdout.trim()).words||[];
  }finally{await fs.rm(directory,{recursive:true,force:true});}
 }
-export async function readProfileLevels(driver,nodes,{expectedUid,expectedNickname,signal,timeout=4500,ocr=windowsLevelOcr}={}){
- throwIfAborted(signal);const deadline=Date.now()+Math.max(1,timeout),remaining=()=>Math.max(1,deadline-Date.now());
- const visible=identity(nodes,expectedUid,expectedNickname);if(!visible)return {reason:'identity_unverified'};
- // Accessible explicit fields take precedence; age, XP fractions and next-level labels are excluded.
+function explicitLevels(nodes,visible){
  const result={};for(const [field,keys]of [['wealthLevel',['tv_rich_level','tv_wealth_level']],['charmLevel',['tv_charm_level']]]){
   const matches=nodes.filter(n=>keys.includes(id(n))&&visible(n));if(matches.length===1){const value=normalized(matches[0].text||matches[0].contentDesc);if(value!==null)result[field]=value;}
- }
+ }return result;
+}
+export async function readProfileLevels(driver,nodes,{expectedUid,expectedNickname,signal,timeout=4500,ocr=windowsLevelOcr}={}){
+ throwIfAborted(signal);const deadline=Date.now()+Math.max(1,timeout),remaining=()=>Math.max(1,deadline-Date.now());
+ let visible=identity(nodes,expectedUid,expectedNickname);if(!visible)return {reason:'identity_unverified'};
+ let result=explicitLevels(nodes,visible);
  if(Object.keys(result).length===2)return result;
- const region=profileLevelRegion(nodes,expectedUid,expectedNickname);if(!region||typeof driver.adb?.screenshotBuffer!=='function')return {...result,reason:'badge_unavailable'};
+ if(typeof driver.adb?.screenshotBuffer!=='function'||typeof driver.bridge?.dumpUi!=='function')return {...result,reason:'badge_unavailable'};
  try{
-  const png=await driver.adb.screenshotBuffer({signal,timeout:remaining()});throwIfAborted(signal);
-  const fresh=await driver.bridge.dumpUi({signal,retries:0,timeout:remaining()});throwIfAborted(signal);
-  const after=profileLevelRegion(fresh.nodes,expectedUid,expectedNickname);
-  if(!after||Object.keys(region).some(k=>region[k]!==after[k]))return {reason:'identity_or_layout_changed'};
-  const explicitFields=new Set(Object.keys(result)),hidden=hiddenLevelSides(png,region),templateValues=readLevelDigits(png,region).values||{};
-  for(const [field,value] of Object.entries(templateValues))if(!explicitFields.has(field))result[field]=value;
-  for(const side of hidden){const field=side===0?'wealthLevel':'charmLevel';if(!explicitFields.has(field))result[field]='?';}
-  if(!['wealthLevel','charmLevel'].every(field=>result[field]!==undefined)){
-   const words=await ocr(png,region,{signal,timeout:remaining()});throwIfAborted(signal);
-   for(const [field,value] of Object.entries(levelsFromOcr(words,region.width*3,region.height*3)))if(result[field]===undefined)result[field]=value;
+  // Gender capture can settle an opening animation. Never use its older geometry.
+  const initial=await driver.bridge.dumpUi({signal,retries:0,timeout:remaining()});throwIfAborted(signal);nodes=initial.nodes;
+  for(let attempt=0;attempt<2&&Date.now()<deadline;attempt++){
+   visible=identity(nodes,expectedUid,expectedNickname);if(!visible)return {reason:'identity_or_layout_changed'};
+   result=explicitLevels(nodes,visible);if(Object.keys(result).length===2)return result;
+   const region=profileLevelRegion(nodes,expectedUid,expectedNickname);if(!region)return {...result,reason:'badge_unavailable'};
+   const png=await driver.adb.screenshotBuffer({signal,timeout:remaining()});throwIfAborted(signal);
+   const fresh=await driver.bridge.dumpUi({signal,retries:0,timeout:remaining()});throwIfAborted(signal);
+   if(!identity(fresh.nodes,expectedUid,expectedNickname))return {reason:'identity_or_layout_changed'};
+   const after=profileLevelRegion(fresh.nodes,expectedUid,expectedNickname);
+   if(!after||Object.keys(region).some(k=>region[k]!==after[k])){nodes=fresh.nodes;continue;}
+   const explicitFields=new Set(Object.keys(result)),hidden=hiddenLevelSides(png,region),templateValues=readLevelDigits(png,region).values||{};
+   for(const [field,value] of Object.entries(templateValues))if(!explicitFields.has(field))result[field]=value;
+   for(const side of hidden){const field=side===0?'wealthLevel':'charmLevel';if(!explicitFields.has(field))result[field]='?';}
+   if(!['wealthLevel','charmLevel'].every(field=>result[field]!==undefined)){
+    const words=await ocr(png,region,{signal,timeout:remaining()});throwIfAborted(signal);
+    for(const [field,value] of Object.entries(levelsFromOcr(words,region.width*3,region.height*3)))if(result[field]===undefined)result[field]=value;
+   }
+   return {...result,reason:Object.keys(result).length?'read':'symbol_not_read'};
   }
-  return {...result,reason:Object.keys(result).length?'read':'symbol_not_read'};
+  return {...result,reason:'layout_unstable'};
  }catch(error){if(isAbortError(error)||signal?.aborted){throwIfAborted(signal);throw error;}return {...result,reason:error.code==='ETIMEDOUT'?'ocr_timeout':'capture_failed'};}
 }

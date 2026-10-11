@@ -4,6 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { decodePng, classifyGenderBadge } = require('../src/gender-badge.cjs');
 const fixture = sex => fs.readFileSync(path.join(__dirname, '../src/assets/gender', `${sex}-badge.png`));
+
+test('anonymous real card and full-profile badge crops match by symbol', () => {
+  for (const [name,sex] of [['card-female','女'],['profile-male','男']]) {
+    const result=classifyGenderBadge(fs.readFileSync(path.join(__dirname,'fixtures/gender',`${name}.png`)));
+    assert.equal(result.sex,sex);assert.ok(result.confidence>=.67);
+  }
+});
 test('recognizes supplied gender symbols, independently of age text', () => {
   for (const [name, sex] of [['female', '女'], ['male', '男']]) {
     const pixels = decodePng(fixture(name));

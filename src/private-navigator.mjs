@@ -90,7 +90,7 @@ export class PrivateNavigator {
     const codes=realCodes.length?realCodes:nodes.filter(n=>n.shortId==='tv_nice_num');
     if (!nickname || codes.length!==1 || !numeric(codes[0].text)) return null;
     if(!realCodes.length&&!this._unique(nodes,'iv_copy'))return null;
-    return {uid:numeric(codes[0].text),nickname,nodes};
+    return {uid:numeric(codes[0].text),nickname,nodes,identitySource:realCodes.length?'tv_user_code':'tv_nice_num'};
   }
   _chat(nodes, nickname) {
     return !!this._unique(nodes,'input_message') && !!this._unique(nodes,'iv_send') &&
@@ -156,7 +156,7 @@ export class PrivateNavigator {
   async returnHome() {
     return this._home();
   }
-  async open(uid) {
+  async openProfile(uid, {requireRealUid=false}={}) {
     uid = String(uid || '');
     if (!/^\d+$/.test(uid)) throw Error('EXPECTED_UID_REQUIRED');
     throwIfAborted(this.signal);
@@ -183,6 +183,19 @@ export class PrivateNavigator {
     await this._tap(result);
     const profile = await this._wait(ns => this._profile(ns),'PROFILE_UID_UNREADABLE');
     this._checkUid(profile,uid);
+    if(requireRealUid && profile.identitySource!=='tv_user_code')throw Error('PROFILE_REAL_UID_UNREADABLE');
+    return profile;
+  }
+  async readProfile(uid, {requireRealUid=true}={}) {
+    const profile=this._profile(await this._snapshot());
+    if(!profile)throw Error('PROFILE_UID_UNREADABLE');
+    this._checkUid(profile,String(uid));
+    if(requireRealUid && profile.identitySource!=='tv_user_code')throw Error('PROFILE_REAL_UID_UNREADABLE');
+    return profile;
+  }
+  async open(uid) {
+    uid=String(uid||'');
+    const profile=await this.openProfile(uid);
     this.onLog('info', `已核对用户 ${profile.nickname} (${uid})，正在打开私聊`);
     await this._tap(this._unique(profile.nodes,'iv_chat'));
     let chat = await this._wait(ns => this._chat(ns,profile.nickname) ? ns : null,'PRIVATE_CHAT_UNAVAILABLE');

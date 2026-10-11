@@ -4,6 +4,7 @@ const { pathToFileURL } = require('url');
 const { randomUUID } = require('crypto');
 const { DeviceSession } = require('./device-session');
 const { isDefinitiveSendRejection } = require('../../src/send-proof.cjs');
+const {normalizeLevel} = require('../../src/recommendation-policy.cjs');
 const modulePath = name => pathToFileURL(path.join(__dirname, '..', '..', 'src', name)).href;
 const modules = Promise.all(['task-policy.mjs', 'task-result.mjs'].map(n => import(modulePath(n))));
 function cancelled(signal) {
@@ -50,6 +51,7 @@ function createTaskRunner(deps = {}) {
     return new RoomCollector(drv, opts);
   });
   const session = new DeviceSession(), tasks = new Map();
+  const enrichmentAttempts=new Map();let enrichmentOrdinal=0;
   let logCallback = null, statusCallback = null, collector = null, collectorRunId = null, statusRevision = 0;
   const emptyStats = () => ({
     sent: 0, ok: 0, fail: 0, unconfirmed: 0, cancelled: 0, skipped: 0, simulated: 0, clicked: 0
@@ -393,6 +395,57 @@ function createTaskRunner(deps = {}) {
     await run.loop;
     return run.result || { ok: false, reason: run.error || 'CANCELLED' };
   }
+  async function enrichRecommendations(options={}) {
+    if(!options||typeof options!=='object'||Array.isArray(options))return {ok:false,reason:'INVALID_ENRICH_OPTIONS'};
+    const limit=options.limit??10;
+    if(!Number.isInteger(limit)||limit<1||limit>30)return {ok:false,reason:'INVALID_ENRICH_LIMIT'};
+    let run;
+    const response=await launch('resolve',{executionMode:'android'},async t=>{
+      if(dataStore.getConfig?.('settings')?.executionMode==='demo')throw Error('REAL_MODE_REQUIRED');
+      if(dataStore.getStatus().collectionRecoveryRequired)throw Error('DATA_RECOVERY_REQUIRED');
+      const users=dataStore.getRecommendations().users.filter(user=> {
+        const attributes=user.attributeValues||user.original;
+        return !['male','female'].includes(user.sex)||(normalizeLevel(attributes.wealthLevel)===null&&attributes.wealthLevelHidden!==true);
+      }).sort((a,b)=>(enrichmentAttempts.get(a.uid)||0)-(enrichmentAttempts.get(b.uid)||0)).slice(0,limit);
+      if(!users.length)throw Error('NO_USERS_TO_ENRICH');
+      await readyDriver(t);
+      if(typeof t.driver.readUserAttributes!=='function')throw Error('PROFILE_ENRICH_UNAVAILABLE');
+      run=t;t.stats={...t.stats,phase:'enriching',total:users.length,processed:0,enriched:0};
+      return users;
+    },async(t,users)=>{
+      const signal=t.controller.signal;
+      for(const user of users) {
+        cancelled(signal);t.stats.currentUid=user.uid;emitStatus();
+        enrichmentAttempts.set(user.uid,++enrichmentOrdinal);
+        log('resolve','info',`补查用户资料 ${t.stats.processed+1}/${users.length}：${user.uid}`);
+        let attributes;
+        try {
+          attributes=await t.driver.readUserAttributes(user.uid,{signal});cancelled(signal);
+          if(attributes?.uid!==user.uid||attributes.uidReal!==true||typeof attributes.nickname!=='string'||!attributes.nickname.trim())throw Error('PROFILE_IDENTITY_MISMATCH');
+        }catch(error){
+          cancelled(signal);if(error.name==='AbortError')throw error;
+          t.stats.fail++;t.stats.processed++;log('resolve','warn',`用户 ${user.uid} 补查失败：${error.message}`);emitStatus();continue;
+        }
+        const patch={};
+        if(['male','female'].includes(attributes.sex)){patch.sex=attributes.sex;if(attributes.sexEvidence)patch.sexEvidence=attributes.sexEvidence;}
+        for(const field of ['wealthLevel','charmLevel']) {
+          const value=normalizeLevel(attributes[field]);if(value!==null)patch[field]=value;
+          if(attributes[`${field}Hidden`]===true)patch[`${field}Hidden`]=true;
+        }
+        cancelled(signal);
+        if(Object.keys(patch).length) {
+          const record={...user.original,...patch,uid:user.uid,uidReal:true,nickname:attributes.nickname,lastSeenAt:Date.now()};
+          dataStore.ingestRealRecords([record],{room:user.original.room,roomCode:user.original.roomCode});
+          t.stats.enriched++;log('resolve','ok',`用户 ${user.uid} 资料已补充`);
+        }else {t.stats.skipped++;log('resolve','warn',`用户 ${user.uid} 暂未读到性别或等级，保留原始资料`);}
+        t.stats.processed++;emitStatus();
+      }
+      return {ok:true,total:users.length,processed:t.stats.processed,enriched:t.stats.enriched,failed:t.stats.fail,skipped:t.stats.skipped};
+    });
+    if(!response.ok)return response;
+    await run.loop;
+    return run.result||{ok:false,reason:run.error||'CANCELLED',processed:run.stats.processed,enriched:run.stats.enriched};
+  }
   async function withDeviceOperation(name, action) {
     let run;
     const response = await launch(name, { executionMode: 'android' }, async (t) => {
@@ -410,7 +463,7 @@ function createTaskRunner(deps = {}) {
     return { ok: true, ...getStatus() };
   }
   return {
-    start, stop, stopAll, waitForIdle, getStatus, startCollect, stopCollect, getCollectStatus, resolveNicknames, withDeviceOperation, refreshDriver, setLogCallback: fn => {
+    start, stop, stopAll, waitForIdle, getStatus, startCollect, stopCollect, getCollectStatus, resolveNicknames, enrichRecommendations, withDeviceOperation, refreshDriver, setLogCallback: fn => {
       logCallback = fn;
     }, setStatusCallback: fn => {
       statusCallback = fn;

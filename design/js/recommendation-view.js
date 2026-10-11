@@ -6,8 +6,16 @@ const RecommendationView = (function () {
   const sexLabels = { male: '男', female: '女', other: '其他', unknown: '未识别' };
   let users = [], activeSettings = null, revision = 0, pending = false, classificationPending = false, initialized = false;
   let retryRequest = null;
+  let enriching = false;
   const el = id => document.getElementById(id);
   function status(text) { el('recommendStatus').textContent = text; }
+  function needsEnrichment(user) {
+    const attributes=user.attributeValues||user.original||{},value=attributes.wealthLevel;
+    const known=attributes.wealthLevelHidden===true || /^[?？]+$/.test(String(value??'').trim()) ||
+      (typeof value==='number'&&Number.isSafeInteger(value)&&value>=0) ||
+      (typeof value==='string'&&/^\d{1,16}$/.test(value.trim())&&Number.isSafeInteger(Number(value.trim())));
+    return !['male','female'].includes(user.sex)||!known;
+  }
   function visibleUsers() {
     const filter = el('recommendGroupFilter').value;
     return users.filter(user => filter === 'all' || user.group === filter);
@@ -23,6 +31,8 @@ const RecommendationView = (function () {
     el('recommendContentCount').textContent = `${length} / 2000 字`;
     el('recommendAssignBtn').disabled = pending || classificationPending || !formMatchesSettings() || !selected.size || !length || length > 2000;
     ['recommendRefreshBtn', 'recommendSelectAllBtn', 'recommendClearBtn', 'recommendLevelField', 'recommendThreshold', 'recommendGroupFilter', 'recommendContent'].forEach(id => { el(id).disabled = pending || classificationPending; });
+    el('recommendEnrichBtn').disabled = enriching || pending || classificationPending;
+    el('recommendEnrichStopBtn').disabled = !enriching;
   }
   function badge(original, field) {
     const hiddenField = field === 'wealthLevel' ? 'wealthLevelHidden' : 'charmLevelHidden';
@@ -34,7 +44,7 @@ const RecommendationView = (function () {
     el('recommendRows').innerHTML = visible.map(user => `<tr data-uid="${escapeHtml(user.uid)}" class="${selected.has(user.uid) ? 'selected' : ''}">
       <td><input type="checkbox" data-uid="${escapeHtml(user.uid)}" aria-label="选择 ${escapeHtml(user.nickname || user.uid)}" ${selected.has(user.uid) ? 'checked' : ''} ${pending ? 'disabled' : ''}></td>
       <td>${escapeHtml(user.nickname || '未命名')}<small>UID ${escapeHtml(user.uid)}</small></td>
-      <td>${escapeHtml(sexLabels[user.sex] || '未识别')}</td><td>${escapeHtml(badge(user.original, 'wealthLevel'))}</td><td>${escapeHtml(badge(user.original, 'charmLevel'))}</td>
+      <td>${escapeHtml(sexLabels[user.sex] || '未识别')}</td><td>${escapeHtml(badge(user.attributeValues || user.original, 'wealthLevel'))}</td><td>${escapeHtml(badge(user.attributeValues || user.original, 'charmLevel'))}</td>
       <td>${escapeHtml(labels[user.group] || '未识别')}${user.levelHidden ? '（等级隐藏）' : ''}</td></tr>`).join('');
     el('recommendEmpty').hidden = visible.length > 0;
     el('recommendEmpty').textContent = users.length ? '当前分组没有用户。' : '暂无用户，请先采集并设置阈值。';
@@ -66,6 +76,7 @@ const RecommendationView = (function () {
         throw new Error(response?.reason || '推荐列表读取失败');
       }
       users = response.users;
+      if(!enriching)el('recommendEnrichStatus').textContent = `待补查 ${users.filter(needsEnrichment).length} 人；每轮 10 人，可重复补查，优先未尝试用户；只读取公开资料，不发送私信。`;
       activeSettings = { levelField: response.levelField, threshold: response.threshold };
       if (options || !el('recommendThreshold').value.trim()) showSettings(activeSettings);
       const known = new Set(users.map(user => user.uid));
@@ -105,10 +116,32 @@ const RecommendationView = (function () {
     } catch (error) { toast(saved ? `分配已保存，但记录刷新失败：${error.message}` : `分配失败：${error.message}`, 'error'); }
     finally { pending = false; render(); }
   }
+  async function enrich() {
+    if(enriching || pending || classificationPending)return;
+    enriching=true;updateControls();el('recommendEnrichStatus').textContent='正在打开公开主页补查，请等待；可随时停止。';
+    let message;
+    try {
+      const result=await api.recommendation.enrich({limit:10});
+      if(!result?.ok)throw Error(result?.reason||'补查失败');
+      message=`本轮检查 ${result.processed} 人，补充 ${result.enriched} 人，失败 ${result.failed} 人，暂未识别 ${result.skipped} 人。`;
+    }catch(error){message=error.message==='CANCELLED'?'补查已停止；已保存资料保留。':`补查未完成：${error.message}`;toast(message,error.message==='CANCELLED'?'ok':'error');}
+    finally {enriching=false;updateControls();await refresh();el('recommendEnrichStatus').textContent=`${message} 待补查 ${users.filter(needsEnrichment).length} 人；每轮 10 人，可重复补查。`;}
+  }
   async function init() {
     if (initialized) return;
     initialized = true;
     el('recommendRefreshBtn').addEventListener('click', saveClassification);
+    el('recommendEnrichBtn').addEventListener('click', enrich);
+    el('recommendEnrichStopBtn').addEventListener('click', async () => {
+      el('recommendEnrichStopBtn').disabled=true;
+      try { const result=await api.task.stop('resolve');if(!result?.ok)throw Error(result?.reason||'停止失败'); }
+      catch(error){toast(error.message,'error');}
+      finally {updateControls();}
+    });
+    api.task?.onStatus?.(state => {
+      const progress=state.resolve;
+      if(enriching && progress?.running && progress.stats?.total)el('recommendEnrichStatus').textContent = `补查 ${progress.stats.processed || 0}/${progress.stats.total}，已补充 ${progress.stats.enriched || 0} 人${progress.stats.currentUid ? `，当前 UID ${progress.stats.currentUid}` : ''}`;
+    });
     el('recommendGroupFilter').addEventListener('change', render);
     el('recommendSelectAllBtn').addEventListener('click', () => { if (!pending) { visibleUsers().forEach(user => selected.add(user.uid)); render(); } });
     el('recommendClearBtn').addEventListener('click', () => { if (!pending) { selected.clear(); render(); } });
@@ -132,5 +165,5 @@ const RecommendationView = (function () {
   function onStream(event) {
     if (['record', 'batch', 'cleared', 'source'].includes(event?.type)) refreshOnStream();
   }
-  return { init, refresh, assign, saveClassification, onStream };
+  return { init, refresh, assign, saveClassification, enrich, onStream };
 })();

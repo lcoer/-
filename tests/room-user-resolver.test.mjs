@@ -6,6 +6,13 @@ const root=(y=0)=>n('','',{packageName:'com.sybl.voiceroom',x:0,y,x2:1080,y2:192
 const room=[root(),n('tv_room_name','Test'),n('tv_room_code','ID:9277'),n('tv_wheat_name','A')];
 const card=(nickname='A',code='12345678')=>[root(770),n('rv_top_bg','',{x:0,y:770,x2:1080,y2:1250}),n('tv_nickname',nickname,{x:461,y:1363,x2:613,y2:1430}),n('tv_user_code',code,{x:84,y:1280,x2:212,y2:1319}),n('tv_user_operate_item','私聊',{y:1500,y2:1600})];
 const users=[{uid:'n123',uidReal:false,nickname:'A'}];
+test('a timed-out profile tap closes only a freshly recognized card',async t=>{
+ let now=0;t.mock.method(Date,'now',()=>now);
+ const d=driver([room,card(),room]);
+ d.bridge.tapByCoord=async()=>{d.taps.push('profile');now=100;return {ok:true};};
+ const result=await resolveVisibleRoomUsers(d,users,{maxDurationMs:40});
+ assert.equal(result.resolved.length,0);assert.equal(d.backs,1);
+});
 function mock(frames){let i=0;return {taps:[],backs:0,bridge:{dumpUi:async()=>({nodes:frames[Math.min(i++,frames.length-1)]})},adb:{}};}
 function driver(frames){const d=mock(frames);d.bridge.tapByCoord=async(...args)=>{d.taps.push(args);return {ok:true};};d.adb.back=async()=>{d.backs++;};return d;}
 test('enriches only exact visible seat from verified public card and closes it',async()=>{for(const code of ['12345678','(12345678)','ID:12345678']){const d=driver([room,card('A',code),card('A',code),room]);const seen=[];const r=await resolveVisibleRoomUsers(d,users,{roomCode:'9277',onUser:u=>seen.push(u)});assert.equal(r.resolved.length,1);assert.equal(r.resolved[0].uid,'12345678');assert.equal(r.resolved[0].resolvedFrom,'n123');assert.equal(seen.length,1);assert.equal(d.taps.length,1);assert.equal(d.backs,1);}});

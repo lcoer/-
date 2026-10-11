@@ -15,8 +15,10 @@ test('identity mismatch and duplicate age controls never request a screenshot',a
  assert.equal(shots,0);
 });
 test('a profile change after capture refuses to attach a gender to the old UID',async()=>{
- const driver={adb:{screenshotBuffer:async()=>Buffer.from('unused')},bridge:{dumpUi:async()=>({nodes:profile().map(n=>n.shortId==='tv_user_code'?{...n,text:'99999'}:n)})}};
+ let dumps=0;
+ const driver={adb:{screenshotBuffer:async()=>Buffer.from('unused')},bridge:{dumpUi:async()=>({nodes:++dumps===1?profile():profile().map(n=>n.shortId==='tv_user_code'?{...n,text:'99999'}:n)})}};
  assert.equal((await readProfileGender(driver,profile(),{expectedUid:'12345',expectedNickname:'Alice'})).sex,'unknown');
+ assert.equal(dumps,2);
 });
 test('cancellation during capture propagates without classifying stale pixels',async()=>{
  const controller=new AbortController();const driver={adb:{screenshotBuffer:async()=>{controller.abort();return Buffer.from('unused');}}};
@@ -32,4 +34,20 @@ test('explicit image controls work without tv_age and a transient capture failur
 test('age badge aliases are recognized without guessing gender from the number',async()=>{
  const nodes=profile().map(n=>n.shortId==='tv_age'?{...n,shortId:'tv_gender_age',text:'♀26'}:n);
  assert.equal((await readProfileGender({},nodes,{expectedUid:'12345',expectedNickname:'Alice'})).sex,'female');
+});
+
+test('a still animating badge is refreshed before screenshot coordinates are selected',async()=>{
+ const initial=profile().filter(n=>n.shortId!=='tv_age').concat(node('iv_gender','',200,100,263,152));
+ const settled=profile().filter(n=>n.shortId!=='tv_age').concat(node('iv_gender','',0,0,63,52));let shots=0;
+ const driver={adb:{screenshotBuffer:async()=>{shots++;return maleBadge;}},bridge:{dumpUi:async()=>({nodes:settled})}};
+ const result=await readProfileGender(driver,initial,{expectedUid:'12345',expectedNickname:'Alice'});
+ assert.equal(result.sex,'male');assert.equal(shots,1);
+});
+
+test('a badge that appears after the initial profile dump is read without guessing',async()=>{
+ const initial=profile().filter(n=>n.shortId!=='tv_age');
+ const settled=initial.concat(node('iv_gender','男',0,0,63,52));let dumps=0;
+ const driver={bridge:{dumpUi:async()=>{dumps++;return {nodes:settled};}}};
+ assert.equal((await readProfileGender(driver,initial,{expectedUid:'12345',expectedNickname:'Alice'})).sex,'male');
+ assert.equal(dumps,1);
 });

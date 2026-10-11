@@ -60,7 +60,7 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
       reason = 'max_duration';
       break;
     }
-    let opened = false, nodes = [];
+    let opened = false, tapped = false, nodes = [];
     try {
       nodes = await read();
       if (!roomPage(nodes)) {
@@ -83,6 +83,7 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
       throwIfAborted(signal);
       if (!clicked?.ok)
         continue;
+      tapped = true;
       profilesRead++;
       // A card may briefly have blank fields; wait only within the profile and total budgets.
       const before = resolved.length, cardDeadline = Math.min(deadline, Date.now() + 1800);
@@ -135,7 +136,7 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
       onLog('warn', `公开资料读取未完成: ${error.message}`);
     }
     finally {
-      if (opened && !signal?.aborted) {
+      if (tapped && !signal?.aborted) {
         try {
           // Back is authorized only by a fresh recognizable card, never by the earlier tap.
           const fresh = await driver.bridge.dumpUi({ signal, retries: 0, timeout: 1200 });

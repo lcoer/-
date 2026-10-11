@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PrivateNavigator } from '../src/private-navigator.mjs';
+import {AndroidDriver} from '../src/android-driver.mjs';
 
 const pkg = 'com.sybl.voiceroom';
 const node = (shortId, text, x, y, x2, y2, extra = {}) => ({shortId,text,x,y,x2,y2,centerX:(x+x2)/2,centerY:(y+y2)/2,packageName:pkg,...extra});
@@ -27,6 +28,32 @@ function fixture({users=['888188'],profileUid='888188',peerUid=profileUid,badInp
  return {driver,actions,setNodes:n=>nodes=n};
 }
 const options={timeoutMs:30,pollIntervalMs:1,actionGapMs:0};
+
+test('public profile enrichment never opens chat and rejects vanity-only identity',async()=>{
+ const d=fixture({normalProfile:true});
+ const profile=await new PrivateNavigator(d.driver,options).openProfile('888188',{requireRealUid:true});
+ assert.equal(profile.identitySource,'tv_user_code');
+ assert.deepEqual(d.actions,['iv_search','set:888188','tv_search','用户','tv_name']);
+ const vanity=fixture();await assert.rejects(new PrivateNavigator(vanity.driver,options).openProfile('888188',{requireRealUid:true}),/REAL_UID_UNREADABLE/);
+ assert.equal(vanity.actions.includes('iv_chat'),false);
+});
+test('readUserAttributes verifies fresh public identity and persists no actions beyond search',async()=>{
+ const d=fixture({normalProfile:true});d.driver.adb.setBridge=()=>{};
+ const driver=new AndroidDriver(d.driver);
+ driver.readProfileGender=async()=>({sex:'female'});driver.readProfileLevels=async()=>({wealthLevel:53,charmLevel:'?'});
+ const result=await driver.readUserAttributes('888188',{navigationOptions:options});
+ assert.deepEqual(result,{uid:'888188',uidReal:true,nickname:'Current name',sex:'female',wealthLevel:53,charmLevel:'?'});
+ assert.equal(d.actions.includes('iv_chat'),false);assert.equal(d.actions.includes('iv_follow'),false);
+});
+test('readUserAttributes rejects changing identity and cancellation before later readers',async()=>{
+ for(const cancelled of [false,true]){
+  const d=fixture({normalProfile:true});d.driver.adb.setBridge=()=>{};
+  const controller=new AbortController(),driver=new AndroidDriver(d.driver);let levelReads=0;
+  driver.readProfileGender=async()=>{if(cancelled)controller.abort();else d.setNodes(profile('99999').map(n=>n.shortId==='tv_nice_num'?{...n,shortId:'tv_user_code'}:n));return {sex:'female'};};
+  driver.readProfileLevels=async()=>{levelReads++;return {wealthLevel:10};};
+  await assert.rejects(driver.readUserAttributes('888188',{signal:controller.signal,navigationOptions:options}));assert.equal(levelReads,0);
+ }
+});
 
 test('returnHome leaves a rejected chat without clicking its failed message or send button',async()=>{
  const d=fixture();d.setNodes(chat().concat(node('rc_errorhint','您当前的贡献等级不够，快去直播看看吧。',0,500,1080,550)));

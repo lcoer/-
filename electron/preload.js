@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
     list: options => ipcRenderer.invoke('recommendation:list', options),
     assign: request => ipcRenderer.invoke('recommendation:assign', request),
     assignments: () => ipcRenderer.invoke('recommendation:assignments'),
+    enrich: options => ipcRenderer.invoke('recommendation:enrich', options),
   },
   // ===== 应用/系统信息 + 模拟器连接(真实模式) =====
   system: {
