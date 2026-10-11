@@ -4,6 +4,11 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  recommendation: {
+    list: options => ipcRenderer.invoke('recommendation:list', options),
+    assign: request => ipcRenderer.invoke('recommendation:assign', request),
+    assignments: () => ipcRenderer.invoke('recommendation:assignments'),
+  },
   // ===== 应用/系统信息 + 模拟器连接(真实模式) =====
   system: {
     // 获取运行环境信息

@@ -3,7 +3,7 @@
   const api = window.api;
 
   // ===== 视图路由 =====
-  const VIEWS = ['ranking', 'rules', 'task', 'copywriting', 'blacklist', 'settings'];
+  const VIEWS = ['ranking', 'rules', 'task', 'copywriting', 'blacklist', 'settings', 'recommendation'];
   function switchView(name) {
     $$('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === name));
     VIEWS.forEach(v => {
@@ -13,6 +13,7 @@
       sec.hidden = !active;
       sec.classList.toggle('active', active);
     });
+    if (name === 'recommendation') RecommendationView.refresh();
   }
 
   function bindNav() {
@@ -25,6 +26,7 @@
   async function refreshAll() {
     await GuestView.updateStats();
     GuestView.onStream({ type: 'stats' });
+    await RecommendationView.refresh();
   }
 
   // 单步容错执行:任一视图初始化失败不阻断后续初始化
@@ -45,6 +47,7 @@
       api.portal.onStream((ev) => {
         if (ev.type === 'log') return;
         try { GuestView.onStream(ev); } catch (e) { console.warn('[app] stream 处理失败', e); }
+        try { RecommendationView.onStream(ev); } catch (e) { console.warn('[app] recommendation stream 处理失败', e); }
       });
     } catch (e) {
       console.warn('[app] 实时流订阅失败', e);
@@ -57,6 +60,7 @@
     await safeStep('Blacklist', () => Blacklist.init());
     await safeStep('Settings', () => Settings.init());
     await safeStep('TaskConsole', () => TaskConsole.init());
+    await safeStep('RecommendationView', () => RecommendationView.init());
     api.task.onStatus(GuestView.onTaskStatus);
 
     // 顶部刷新按钮

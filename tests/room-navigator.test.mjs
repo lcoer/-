@@ -24,6 +24,18 @@ test('failed first card is skipped and verified second room is entered',async()=
  const d=device({fail:new Set(['A'])});const n=new RoomNavigator(d.driver,{entryTimeoutMs:5,pollIntervalMs:1});
  assert.equal((await n.nextRoom()).room,'B');assert.deepEqual(d.clicks,['tv_room_name:A','tv_room_name:B']);assert.equal(n.getStatus().failed,1);
 });
+test('a scrolled home feed is recognized without an offscreen recommended header',async()=>{
+ const d=device();
+ d.setNodes([
+  node('ll_tab_home','',0,1700,200,1900),node('tv_tab_home','聊天室',0,1800,200,1900),
+  node('ll_tab_mine','',800,1700,1080,1900),node('ll_tab_message','',500,1700,700,1900),
+  node('mRecyclerView','',0,0,1080,1700,{className:'android.widget.GridView'}),
+  node('rv_recommend_room','',0,0,1080,-79,{className:'androidx.recyclerview.widget.RecyclerView'}),
+  node('tv_room_name','A',46,968,360,1019)
+ ]);
+ const nav=new RoomNavigator(d.driver,{entryTimeoutMs:5,pollIntervalMs:1});
+ assert.equal((await nav.ensureRoom())?.room,'A');assert.deepEqual(d.clicks,['tv_room_name:A']);
+});
 test('hidden inflated cards and tiny partial cards are never tapped',async()=>{
  const d=device({names:[],extra:[node('tv_room_name','hidden',10,2048,350,1747),node('tv_room_name','tiny',100,900,123,950)]});
  const n=new RoomNavigator(d.driver,{entryTimeoutMs:5,pollIntervalMs:1});assert.equal(await n.nextRoom(),null);assert.equal(d.clicks.length,0);assert.ok(d.getSwipes()<=4);

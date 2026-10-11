@@ -14,6 +14,9 @@ test('date filter uses Shanghai calendar and preserves original source row index
  assert.equal(result.totals.userCount,1);assert.deepEqual(result.details[0].sourceRecordIndexes,[1]);
 });
 test('auto selection detects existing level field without equating VIP with user levels',()=>{
+ assert.equal(classifyUsers([{uid:'1',source:'room',wealthLevel:37}]).fields.level,'wealthLevel');
+ const badges=classifyUsers([{uid:'1',source:'room',wealthLevel:37,charmLevel:103}],{levelField:'charmLevel'});assert.equal(badges.details[0].level,'103');
+ assert.equal(classifyUsers([{uid:'1',source:'room',wealthLevel:37,charmLevel:103}]).fields.level,null);
  assert.equal(classifyUsers([{uid:'1',source:'room',userLevel:5}]).fields.level,'userLevel');
  const result=classifyUsers([{uid:'1',source:'room',vipLevel:1,userLevel:5}]);assert.equal(result.fields.level,null);assert.ok(result.warnings.some(w=>w.includes('level')));
  assert.throws(()=>classifyUsers([],{levelField:'__proto__'}),/INVALID_FIELD/);

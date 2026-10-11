@@ -3,7 +3,7 @@ function validateConfigChange(key, value) {
   if (!['rules', 'copywriting', 'blacklist', 'settings', 'collection'].includes(key))
     return error('INVALID_CONFIG_KEY');
   if (key === 'blacklist')
-    return Array.isArray(value) && value.every(v => typeof v === 'string' && /^\d+$/.test(v)) ? { ok: true } : error('INVALID_BLACKLIST');
+    return Array.isArray(value) && value.every(v => typeof v === 'string' && /^\d{1,32}$/.test(v)) ? { ok: true } : error('INVALID_BLACKLIST');
   if (!value || typeof value !== 'object' || Array.isArray(value))
     return error('INVALID_CONFIG');
   if (key === 'settings' && !['android', 'demo'].includes(value.executionMode))

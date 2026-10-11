@@ -1,6 +1,6 @@
 // Read-only classification of the records-v2 observation dataset.
 const own=(object,key)=>Object.hasOwn(object,key);
-const LEVEL_FIELDS=['vipLevel','userLevel','level','vip_level','user_level'];
+const LEVEL_FIELDS=['wealthLevel','charmLevel','vipLevel','userLevel','level','vip_level','user_level'];
 const safeField=field=>typeof field==='string'&&/^[a-zA-Z][a-zA-Z0-9_]*$/.test(field)&&!['constructor','prototype','__proto__'].includes(field);
 function timestamp(value){
  const time=typeof value==='number'?value:/^\d+$/.test(String(value||''))?Number(value):Date.parse(value);

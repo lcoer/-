@@ -101,7 +101,44 @@ app.whenReady().then(async () => {
     })()`));
     if (!checks.oversizedDraftPreserved || !checks.editorRoundTrip || !checks.oneConfirmation || !checks.demoPrivateLimit)
       throw Error(`Customer UI assertions failed: ${JSON.stringify(checks)}`);
-    for (const view of ['ranking', 'rules', 'task', 'copywriting', 'blacklist', 'settings']) {
+    const numericBadge=fs.readFileSync(path.join(__dirname,'../tests/fixtures/levels/numeric.png'));
+    const digitValues=load('src/level-digits.cjs').readLevelDigits(numericBadge,{x:0,y:0,width:180,height:41}).values;
+    if(digitValues.wealthLevel!==37||digitValues.charmLevel!==103)throw Error('Bundled level digit templates failed');
+    if(!fs.readFileSync(path.join(productRoot,'src/level-ocr.ps1'),'utf8').includes('OcrEngine'))throw Error('Bundled OCR fallback missing');
+    checks.levelAssets=true;
+    store.ingestRealRecords([
+      {uid:'810001',uidReal:true,nickname:'等级37<&>',wealthLevel:37,charmLevel:103,sex:'female'},
+      {uid:'810002',uidReal:true,nickname:'等级54',wealthLevel:54,charmLevel:1,sex:'male'},
+      {uid:'810003',uidReal:true,nickname:'隐藏等级',wealthLevel:'?',charmLevel:'?',sex:'male'},
+      {uid:'810004',uidReal:true,nickname:'尚未读取',sex:'unknown'}
+    ]);
+    Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
+      document.querySelector('.nav-item[data-view="recommendation"]').click();
+      document.getElementById('recommendLevelField').value='wealthLevel';
+      document.getElementById('recommendThreshold').value='54';
+      await RecommendationView.saveClassification();
+      const list=await window.api.recommendation.list();
+      if(getComputedStyle(document.getElementById('recommendEmpty')).display!=='none')throw Error('Empty recommendation hint visible with users');
+      const group=uid=>list.users.find(user=>user.uid===uid)?.group;
+      if(group('810001')!=='low'||group('810002')!=='high'||group('810003')!=='high'||group('810004')!=='unclassified')throw Error('Level boundary or question mark grouping failed');
+      const checkbox=document.querySelector('#recommendRows input[data-uid="810002"]');checkbox.click();
+      document.querySelector('#recommendRows tr[data-uid="810003"]').click();
+      document.getElementById('recommendContent').value='推荐内容<&> 😀\\n指定两位作者';
+      document.getElementById('recommendContent').dispatchEvent(new Event('input'));
+      await RecommendationView.assign();
+      const history=await window.api.recommendation.assignments();
+      const latest=history.assignments.at(-1);
+      const assigned=latest&&latest.authors.map(user=>user.uid).sort().join(',')==='810002,810003';
+      if(!assigned||latest.content!=='推荐内容<&> 😀\\n指定两位作者')throw Error('Author assignment or content round trip failed');
+      if(document.getElementById('recommendSelectedCount').textContent!=='已选 0 人')throw Error('Selection was not cleared');
+      const before=history.assignments.length;await RecommendationView.assign();
+      if((await window.api.recommendation.assignments()).assignments.length!==before)throw Error('Empty repeat assignment saved');
+      return {recommendationClassification:true,recommendationSelection:true,authorAssignment:true};
+    })()`));
+    const reload=store.createDataStore({dataDir:path.join(out,'user-data')});reload.init();
+    if(!reload.getAssignments().assignments.some(item=>item.authors.some(author=>author.uid==='810002')))throw Error('Author assignment did not survive restart');
+    reload.shutdown();checks.assignmentRestart=true;
+    for (const view of ['ranking', 'recommendation', 'rules', 'task', 'copywriting', 'blacklist', 'settings']) {
       await win.webContents.executeJavaScript(`document.querySelector('.nav-item[data-view="${view}"]').click()`);
       const active = await win.webContents.executeJavaScript(`document.querySelector('.nav-item.active')?.dataset.view`);
       if (active !== view)
@@ -109,6 +146,11 @@ app.whenReady().then(async () => {
       await new Promise(r => setTimeout(r, 450));
       const shot = await win.webContents.capturePage();
       fs.writeFileSync(path.join(out, `${view}.png`), shot.toPNG());
+      if(view==='recommendation') {
+        await win.webContents.executeJavaScript("document.getElementById('recommendContent').scrollIntoView({block:'center'})");
+        await new Promise(resolve=>setTimeout(resolve,100));
+        fs.writeFileSync(path.join(out,'recommendation-authors.png'),(await win.webContents.capturePage()).toPNG());
+      }
     }
     if (errors.length)
       throw Error(errors.join('\n'));

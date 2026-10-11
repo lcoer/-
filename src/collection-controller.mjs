@@ -164,7 +164,7 @@ export class CollectionController {
       if (user.uidReal)
         this.sessionVerified.add(user.uid);
       const record = { ...user, room: meta.room, roomCode: meta.roomCode || null, lastSeenAt: now, ts: now };
-      const signature = JSON.stringify([record.nickname, record.sex, record.guild, record.guildKnown, record.rongCloudId, record.room, record.roomCode]);
+      const signature = JSON.stringify([record.nickname, record.sex, record.wealthLevel, record.charmLevel, record.guild, record.guildKnown, record.rongCloudId, record.room, record.roomCode]);
       const prior = this.published.get(record.uid);
       if (prior && prior.signature === signature && now - prior.at < (this.opts.observationRefreshMs || 30000)) {
         duplicates++;
@@ -240,12 +240,12 @@ export class CollectionController {
         await this._publish(visibleUsers, meta);
       }
     }
-    if (this.opts.resolveUsers !== false && this.driver.bridge && visibleUsers.some(u => !u.uidReal || !['male','female'].includes(u.sex))) {
+    if (this.opts.resolveUsers !== false && this.driver.bridge && visibleUsers.some(u => !u.uidReal || !['male','female'].includes(u.sex) || (typeof this.driver.readProfileLevels==='function'&&![u.wealthLevel,u.charmLevel].every(v=>v==='?'||(Number.isInteger(v)&&v>=0))))) {
       const profileLimit=this.opts.maxProfiles??6;
-      const resolved = await this.userResolver(this.driver, visibleUsers, { ...meta, signal: this.signal, maxProfiles:profileLimit, maxDurationMs:Math.min(30000,5000+profileLimit*4000), knownMappings: this.resolvedHintCache,attemptHistory:this.profileAttempts,
+      const resolved = await this.userResolver(this.driver, visibleUsers, { ...meta, signal: this.signal, maxProfiles:profileLimit, maxDurationMs:Math.min(30000,5000+profileLimit*(typeof this.driver.readProfileLevels==='function'?8500:4000)), knownMappings: this.resolvedHintCache,attemptHistory:this.profileAttempts,
         onLog: (l, m) => this.log(l, m), onUser: async (record) => {
           await this._publish([record], meta);
-          const cached={uid:record.uid,sex:record.sex||'unknown',at:this.clock(),retryAfter:this.clock()+10000};
+          const cached={uid:record.uid,sex:record.sex||'unknown',wealthLevel:record.wealthLevel,charmLevel:record.charmLevel,at:this.clock(),retryAfter:this.clock()+10000};
           this.resolvedHintCache.set(record.resolvedFrom,cached);
           this.resolvedHintCache.set(record.uid,cached);
         } });

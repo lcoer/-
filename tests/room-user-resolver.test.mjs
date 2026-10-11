@@ -61,3 +61,11 @@ test('operation-row card with nice number only is closed without emitting an unp
  const d=driver([]);d.bridge.dumpUi=async()=>({nodes:d.taps.length&&!d.backs?alternative:room});
  const r=await resolveVisibleRoomUsers(d,users,{maxDurationMs:50});assert.equal(r.resolved.length,0);assert.equal(d.backs,1);
 });
+
+test('verified known-gender users still receive missing level enrichment and unknown-level cache retries',async()=>{
+ const d=driver([room,card(),card(),room]);d.readProfileGender=async()=>({sex:'male'});d.readProfileLevels=async()=>({wealthLevel:37,charmLevel:'?'});
+ const result=await resolveVisibleRoomUsers(d,[{uid:'12345678',uidReal:true,nickname:'A',sex:'male'}],{knownMappings:new Map([['12345678',{sex:'male',retryAfter:0}]])});
+ assert.equal(result.resolved[0].wealthLevel,37);assert.equal(result.resolved[0].charmLevel,'?');assert.equal(d.backs,1);
+ const cached=driver([room]);cached.readProfileLevels=async()=>({});
+ await resolveVisibleRoomUsers(cached,users,{knownMappings:new Map([['n123',{sex:'male',wealthLevel:54,charmLevel:103}]])});assert.equal(cached.taps.length,0);
+});

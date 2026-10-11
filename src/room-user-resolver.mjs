@@ -43,13 +43,14 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
   };
   const attemptKey=user=>JSON.stringify([roomCode||room||'',user.nickname]);
   let ordinal=Math.max(0,...attemptHistory.values());
-  const candidates = [...new Map((Array.isArray(users) ? users : []).filter(u => (u.uidReal === false || !['male','female'].includes(u.sex)) && text({ text: u.nickname })).map(u => [u.uid, u])).values()]
+  const needsLevels=user=>typeof driver.readProfileLevels==='function'&&![user.wealthLevel,user.charmLevel].every(v=>v==='?'||(Number.isInteger(v)&&v>=0));
+  const candidates = [...new Map((Array.isArray(users) ? users : []).filter(u => (u.uidReal === false || !['male','female'].includes(u.sex) || needsLevels(u)) && text({ text: u.nickname })).map(u => [u.uid, u])).values()]
     .sort((a,b)=>(attemptHistory.get(attemptKey(a))||0)-(attemptHistory.get(attemptKey(b))||0)||Number(b.seenFrom==='wheat')-Number(a.seenFrom==='wheat')||Number(a.uidReal!==false)-Number(b.uidReal!==false));
   const visitedNames=new Set();
   for (const user of candidates) {
     throwIfAborted(signal);
     const cached=knownMappings instanceof Map?knownMappings.get(user.uid):knownMappings?.[user.uid];
-    if(cached&&typeof cached==='object'&&(['male','female'].includes(cached.sex)||cached.retryAfter>Date.now()))continue;
+    if(cached&&typeof cached==='object'&&((['male','female'].includes(cached.sex)&&!needsLevels(cached))||cached.retryAfter>Date.now()))continue;
     if(visitedNames.has(user.nickname))continue;
     if (profilesRead >= maxProfiles) {
       reason = 'max_profiles';
@@ -97,8 +98,12 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
             const gender=typeof driver.readProfileGender==='function'?await driver.readProfileGender(nodes,{expectedUid:uid,expectedNickname:nickname,signal,timeout:Math.min(4000,remaining())}):{sex:'unknown'};
             throwIfAborted(signal);
             if(gender.sex==='unknown')onLog('info',`用户 ${uid} 的性别徽章暂未确认，后续继续补查${gender.reason?`（${gender.reason}）`:''}`);
+            const levels=typeof driver.readProfileLevels==='function'?await driver.readProfileLevels(nodes,{expectedUid:uid,expectedNickname:nickname,signal,timeout:Math.min(4500,remaining())}):{};
+            throwIfAborted(signal);
+            if(['capture_failed','ocr_timeout'].includes(levels.reason))onLog('warn',`用户 ${uid} 的等级暂未读取（${levels.reason}），保留待识别，下轮补查。`);
             const record = { ...user, uid, uidReal: true, nickname, room: room || user.room || '', roomCode: roomCode || user.roomCode || '', seenFrom: 'roomProfile', evidence: 'matched_room_user_card', resolvedFrom: user.uid, lastSeenAt: new Date().toISOString() };
             if(['male','female'].includes(gender.sex)){record.sex=gender.sex;if(gender.evidence)record.sexEvidence=gender.evidence;}
+            for(const field of ['wealthLevel','charmLevel'])if(levels[field]==='?'||(Number.isInteger(levels[field])&&levels[field]>=0))record[field]=levels[field];
             throwIfAborted(signal);
             resolved.push(record);
             await onUser(record);

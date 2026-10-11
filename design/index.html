@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="css/task-view.css">
 <link rel="stylesheet" href="css/copywriting-view.css">
 <link rel="stylesheet" href="css/dialog.css">
+<link rel="stylesheet" href="css/recommendation-view.css">
 </head>
 <body>
 <!-- 自定义暗色标题栏 -->
@@ -47,6 +48,10 @@
           <span class="material-symbols-outlined">sensors</span>
           <span>实时贵宾位</span>
           <span class="nav-count" id="guestNavCount">--</span>
+        </button>
+        <button class="nav-item" data-view="recommendation">
+          <span class="material-symbols-outlined">checklist</span>
+          <span>推荐列表</span>
         </button>
         <button class="nav-item" data-view="rules">
           <span class="material-symbols-outlined">tune</span>
@@ -515,6 +520,40 @@
           </div>
         </div>
       </section>
+      <section class="view recommendation-view" hidden>
+        <div class="card recommendation-controls">
+          <h3>推荐列表 · 用户等级分类</h3>
+          <p class="field-hint">选择等级体系并设置分界：等级 ≥ 阈值为高等级，低于阈值为低等级。所选等级显示 ??? 时默认高等级；未识别等级单独列出。年龄、席位与贡献分数不作为等级。</p>
+          <div class="recommendation-toolbar">
+            <label>等级体系<select id="recommendLevelField"><option value="wealthLevel">财富等级（图一蓝色徽章，可变色）</option><option value="charmLevel">魅力等级（图一粉色徽章，可变色）</option></select></label>
+            <label>高等级阈值<input type="number" id="recommendThreshold" min="0" step="1" placeholder="请设置整数阈值"></label>
+            <button class="save-btn" id="recommendRefreshBtn">保存阈值并刷新</button>
+          </div>
+          <p class="field-hint" id="recommendStatus" role="status">请设置分类阈值。</p>
+        </div>
+        <div class="stats-row recommendation-stats">
+          <div class="stat-card"><div class="stat-label">高等级用户</div><div class="stat-value" id="recommendHighCount">0</div></div>
+          <div class="stat-card"><div class="stat-label">低等级用户</div><div class="stat-value" id="recommendLowCount">0</div></div>
+          <div class="stat-card"><div class="stat-label">等级未识别</div><div class="stat-value" id="recommendUnknownCount">0</div></div>
+        </div>
+        <div class="card">
+          <div class="recommendation-toolbar">
+            <label>查看分组<select id="recommendGroupFilter"><option value="all">全部用户</option><option value="high">高等级</option><option value="low">低等级</option><option value="unclassified">等级未识别</option></select></label>
+            <button class="save-btn ghost" id="recommendSelectAllBtn">全选当前分组</button>
+            <button class="save-btn ghost" id="recommendClearBtn">清空选择</button>
+            <span id="recommendSelectedCount">已选 0 人</span>
+          </div>
+          <div class="recommendation-table-wrap custom-scroll"><table class="recommendation-table"><thead><tr><th>选择</th><th>用户 / UID</th><th>性别</th><th>财富等级</th><th>魅力等级</th><th>分组</th></tr></thead><tbody id="recommendRows"></tbody></table></div>
+          <p class="field-hint" id="recommendEmpty">暂无用户，请先采集并设置阈值。</p>
+        </div>
+        <div class="card recommendation-assignment">
+          <h3>指定作者 / 负责人</h3>
+          <p class="field-hint">填写推荐内容，将职责分配给已选用户。此操作仅保存本地分配记录，不会自动发送私信。</p>
+          <label for="recommendContent">推荐内容</label><textarea id="recommendContent" rows="4" placeholder="请输入由所选用户撰写或负责的内容"></textarea>
+          <div class="recommendation-toolbar"><span id="recommendContentCount">0 / 2000 字</span><button class="save-btn" id="recommendAssignBtn" disabled>指定给已选作者</button></div>
+          <h3>已保存分配</h3><div id="recommendAssignments"></div>
+        </div>
+      </section>
     </main>
   </div>
 </div>
@@ -541,6 +580,7 @@
 <script src="js/copywriting.js"></script>
 <script src="js/blacklist.js"></script>
 <script src="js/settings.js"></script>
+<script src="js/recommendation-view.js"></script>
 <script src="js/app.js"></script>
 <script src="titlebar.js"></script>
 </body>

@@ -79,7 +79,21 @@ app.whenReady().then(async()=>{
   Object.assign(report.cases.at(-1),{actual:{rounds:collection.stats.rounds,total:records.total,persisted:persisted.records.length,duplicates:duplicateKeys.length-new Set(duplicateKeys).size,verified:records.records.filter(r=>r.uidReal).length},passed:records.total>0&&persisted.records.length===records.total&&new Set(duplicateKeys).size===duplicateKeys.length});save();
   const restarted=store.createDataStore({dataDir:path.join(out,'user-data')});restarted.init();
   report.cases.push({id:'R02',module:'采集',path:'停止采集 → 重新加载隔离存储',input:'实际采集历史',expected:'记录数量和字段保持不变',actual:{before:records.total,after:restarted.getRecords().total},passed:records.total===restarted.getRecords().total});restarted.shutdown();save();
-  if(process.env.SYBL_ACCEPTANCE_COLLECT_ONLY==='1'){report.ok=report.cases.every(c=>c.passed===true)&&collection.stats.roomsVisited>=2;report.verdict=report.ok?'passed_collection_only':'failed_collection';if(!report.ok)process.exitCode=2;return;}
+  if(process.env.SYBL_ACCEPTANCE_COLLECT_ONLY==='1'){
+   const recommendations=await js("window.api.recommendation.list({levelField:'wealthLevel',threshold:54})");
+   if(!recommendations.ok)throw Error(`Recommendations: ${recommendations.reason}`);
+   report.recommendations={counts:recommendations.counts,users:recommendations.users};
+   report.cases.push({id:'R04',module:'等级',path:'资料卡 → 等级识别 → 真实UID记录 → 推荐分组',expected:'至少一个实机用户的财富等级成功入库并按54阈值分组，未读取不伪装问号',actual:{high:recommendations.counts.high,low:recommendations.counts.low,unclassified:recommendations.counts.unclassified},passed:recommendations.counts.high+recommendations.counts.low>0});
+   const author=recommendations.users[0];
+   if(author){
+    const assigned=await js(`window.api.recommendation.assign(${JSON.stringify({uids:[author.uid],content:'本地验收推荐内容，仅验证内部作者分配',levelField:'wealthLevel',threshold:54,requestId:runId})})`);
+    const reloaded=store.createDataStore({dataDir:path.join(out,'user-data')});reloaded.init();
+    const restored=reloaded.getAssignments().assignments.find(item=>item.id===assigned.assignment?.id);reloaded.shutdown();
+    report.cases.push({id:'R03',module:'推荐',path:'真实采集记录 → 财富等级54分类 → 本地指定作者 → 重载',expected:'推荐数与真实UID一致，作者与内容保存且重启可恢复',actual:{counts:recommendations.counts,assignedUid:assigned.assignment?.authors[0]?.uid,restored:!!restored},passed:assigned.ok&&restored?.authors[0]?.uid===author.uid&&recommendations.counts.total===records.records.filter(r=>r.uidReal).length});
+   }
+   await js("document.querySelector('.nav-item[data-view=recommendation]').click();RecommendationView.refresh()");await capture('recommendation-real-collected');
+   report.ok=report.cases.every(c=>c.passed===true)&&collection.stats.roomsVisited>=2;report.verdict=report.ok?'passed_collection_only':'failed_collection';if(!report.ok)process.exitCode=2;return;
+  }
   if(fs.existsSync(guard)){report.ok=false;report.verdict='dispatch_already_attempted';process.exitCode=2;report.cases.push({id:'R03',module:'私信',path:'真实发送保护检查',passed:null,actual:'已存在本次验收发送意图，禁止再次真实发送',guard});return;}
   const beforePending=await js('window.api.task.getPending()');if(beforePending.results?.length)throw Error('Pending results exist in isolated run');
   await js("document.querySelector('.nav-item[data-view=copywriting]').click()");

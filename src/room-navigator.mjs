@@ -138,7 +138,13 @@ export class RoomNavigator {
     const region = nodes.find(node => node.shortId === 'rv_recommend_room');
     if (region)
       this.homeConfirmed = true;
-    const main = nodes.find(node => node.shortId === 'mRecyclerView' && /RecyclerView/.test(node.className || ''));
+    const main = nodes.find(node => node.shortId === 'mRecyclerView' && /(?:RecyclerView|GridView)$/.test(node.className || ''));
+    // A feed already scrolled past its recommendation header is still home.
+    // Require visible home labels, navigation tabs and a room card in the feed.
+    if (main && nodes.some(n=>n.shortId==='tv_tab_home'&&n.text==='聊天室') &&
+      ['ll_tab_home','ll_tab_mine','ll_tab_message'].every(id=>nodes.some(n=>n.shortId===id)) &&
+      !nodes.some(n=>n.shortId==='layout_online_user') &&
+      nodes.some(n=>n.shortId==='tv_room_name'&&n.text?.trim()&&inside(n,main))) this.homeConfirmed=true;
     if (main && this.homeConfirmed && nodes.some(node => node.shortId === 'll_tab_home'))
       return main;
     if (!region)

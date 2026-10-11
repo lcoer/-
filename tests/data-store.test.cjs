@@ -5,6 +5,50 @@ const path = require('node:path');
 const { createDataStore } = require('../electron/services/data-store');
 const today = new Date(2026, 9, 9, 12).getTime();
 function store(options = {}) { const s = createDataStore({ clock: () => today, persist: false, ...options }); s.init(); return s; }
+test('stream notification failures do not turn committed data into failed operations', () => {
+ const dir=fs.mkdtempSync(path.join(__dirname,'syl-store-'));
+ const originalError=console.error, logs=[], events=[];
+ let s;
+ try {
+  console.error=(...args)=>logs.push(args.join(' '));
+  s=store({dataDir:dir,persist:true});
+  s.setStreamCallback(event=>{events.push(event.type);throw Error('renderer unavailable');});
+  const result=s.ingestRealRecords([{uid:'12345',nickname:'fixture'}]);
+  assert.equal(result.added,1);
+  assert.deepEqual(events,['batch','stats']);
+  s.shutdown();
+  const restored=store({dataDir:dir,persist:true});
+  assert.equal(restored.getRecords().total,1);restored.shutdown();
+  assert.doesNotThrow(()=>s.reportCollectError('fixture error'));
+  assert.doesNotThrow(()=>s.reportCollectRoom('fixture room'));
+  assert.doesNotThrow(()=>s.pushSystemLog('info','fixture log'));
+  assert.doesNotThrow(()=>s.setSource('demo'));
+  assert.equal(s.getStatus().streaming,true);
+  assert.doesNotThrow(()=>s.setSource('room'));
+  assert.equal(s.getStatus().streaming,false);
+  assert.equal(s.clearDemoRecords(true).removed,1);
+  assert.ok(logs.some(line=>line.includes('batch')&&line.includes('renderer unavailable')));
+  assert.equal(logs.length,events.length);
+ } finally {
+  s?.shutdown();console.error=originalError;fs.rmSync(dir,{recursive:true,force:true});
+ }
+});
+test('demo stream keeps running when its notification subscriber throws', t => {
+ t.mock.timers.enable({apis:['setInterval']});
+ const s=store(), events=[], originalError=console.error;
+ try {
+  console.error=()=>{};
+  s.setStreamCallback(event=>{events.push(event.type);throw Error('renderer unavailable');});
+  s.setSource('demo');events.length=0;
+  const interval=require('../electron/config').dataFeed.sampleIntervalMs;
+  assert.doesNotThrow(()=>t.mock.timers.tick(interval));
+  assert.equal(s.getRecords().total,1);
+  assert.deepEqual(events,['record','stats']);
+  assert.doesNotThrow(()=>t.mock.timers.tick(interval));
+  assert.equal(s.getRecords().total,2);
+  assert.equal(s.getStatus().streaming,true);
+ } finally {s.shutdown();console.error=originalError;}
+});
 test('isolated stores default to room and filter dates including unknown gender', () => {
   const s = store(); const other = store();
   s.ingestRealRecords([{uid:'123',sex:'unknown',ts:today},{uid:'456',sex:'female',ts:today-86400000}]);

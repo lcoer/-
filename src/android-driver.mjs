@@ -11,6 +11,7 @@ import { BridgeClient } from './bridge-client.mjs';
 import * as ui from './android-ui.mjs';
 import { PrivateNavigator } from './private-navigator.mjs';
 import {readProfileGender} from './user-gender.mjs';
+import {readProfileLevels} from './user-level.mjs';
 
 import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
 
@@ -87,6 +88,7 @@ export class AndroidDriver {
   }
 
   async isAppForeground() { return this.adb.isAppForeground(); }
+  async readProfileLevels(nodes,options={}) { return readProfileLevels(this,nodes,{signal:this.signal,...options}); }
   async readProfileGender(nodes,options={}) { return readProfileGender(this,nodes,{signal:this.signal,...options}); }
 
   async launchApp() { return this.adb.launchApp(); }

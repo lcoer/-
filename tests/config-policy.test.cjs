@@ -28,3 +28,8 @@ test('saving copywriting rejects oversized Unicode text before persisting unusab
  assert.equal(validateConfigChange('copywriting',{contents:['😀'.repeat(2001)],mode:'select'}).ok,false);
  assert.equal(validateConfigChange('copywriting',{contents:['😀'.repeat(2000)],mode:'select'}).ok,true);
 });
+
+test('blacklist rejects UIDs beyond the task identity limit at configuration time',()=>{
+  assert.equal(validateConfigChange('blacklist',['1'.repeat(32)]).ok,true);
+  assert.equal(validateConfigChange('blacklist',['1'.repeat(33)]).ok,false);
+});

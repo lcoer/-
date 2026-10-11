@@ -13,6 +13,8 @@ const { createHash } = require('node:crypto');
 const appConfig = require('../config');
 const {openOutcomeJournal} = require('./outcome-journal');
 const {isDefinitiveSendRejection} = require('../../src/send-proof.cjs');
+const {randomUUID} = require('node:crypto');
+const {validateOptions,normalizeLevel,classifyRecommendations} = require('../../src/recommendation-policy.cjs');
 
 let _app = null;
 try { _app = require('electron').app; } catch { _app = null; }
@@ -70,6 +72,8 @@ function init() {
   STATE.sentFile = path.join(dir, 'sent-v2.json');
   STATE.sourceFile = path.join(dir, 'source.json');
   STATE.recordsFile = path.join(dir, 'records-v2.json');
+  STATE.recommendationsFile = path.join(dir, 'recommendations-v1.json');
+  STATE.recommendations = {schemaVersion:1,settings:{levelField:'wealthLevel',threshold:54},assignments:[]};
   STATE.outcomesFile = path.join(dir, 'outcomes-v2.json');
   STATE.config = defaultConfig(); STATE.stats = {}; STATE.sentToday = {}; STATE.records = []; STATE.outcomes = []; STATE.legacyStats = {}; STATE.recoveryRequired = false; STATE.collectionRecoveryRequired = false;
   if (persist) {
@@ -80,6 +84,7 @@ function init() {
     loadJson(path.join(dir, 'stats.json'), STATE.legacyStats, {});
     loadJson(STATE.sourceFile, STATE.sourcePref, { source: 'room' });
     const history = loadCollectionHistory();
+    loadRecommendations();
     STATE.records = history.records.map(r => ({...r, ts:epoch(r.ts,nowMs()), lastSeenAt:epoch(r.lastSeenAt,epoch(r.ts,nowMs()))}));
     const results = {}; loadJson(STATE.outcomesFile, results, {}, true);
     if (Object.keys(results).length && (results.schemaVersion !== 2 || !Array.isArray(results.results))) throw Error('DATA_CORRUPT: Invalid outcome journal schema');
@@ -119,6 +124,56 @@ function loadCollectionHistory() {
   throw Error('DATA_CORRUPT: Cannot read records-v2.json or its validated backup');
 }
 
+function validRecommendations(value) {
+  if (value?.schemaVersion !== 1 || !Array.isArray(value.assignments)) return false;
+  try { if(value.settings?.threshold!==null) validateOptions(value.settings); }
+  catch { return false; }
+  return ['wealthLevel','charmLevel'].includes(value.settings?.levelField) && value.assignments.every(item =>
+    item && typeof item.id==='string' && Number.isFinite(item.createdAt) && typeof item.content==='string' &&
+    item.content.trim() && [...item.content].length<=2000 && Array.isArray(item.authors) && item.authors.length &&
+    item.authors.every(author=>author && typeof author.uid==='string' && /^\d{1,32}$/.test(author.uid)) &&
+    ['wealthLevel','charmLevel'].includes(item.levelField) && Number.isSafeInteger(item.threshold) && item.threshold>=0);
+}
+function loadRecommendations() {
+  const files=[STATE.recommendationsFile,`${STATE.recommendationsFile}.bak`];
+  if(!files.some(file=>fs.existsSync(file))) return;
+  for(const file of files) {
+    try { const value=JSON.parse(fs.readFileSync(file,'utf8'));if(validRecommendations(value)){STATE.recommendations=value;return;} }
+    catch {}
+  }
+  throw Error('DATA_CORRUPT: Cannot read recommendations-v1.json or its validated backup');
+}
+function getRecommendations(options) {
+  const settings=options===undefined?STATE.recommendations.settings:options;
+  if(settings?.threshold===null || settings?.threshold===undefined) throw Error('CONFIGURATION_REQUIRED');
+  const selected=validateOptions(settings),result=classifyRecommendations(STATE.records,selected);
+  if(JSON.stringify(selected)!==JSON.stringify(STATE.recommendations.settings)) {
+    const next={...STATE.recommendations,settings:selected};saveJson(STATE.recommendationsFile,next);STATE.recommendations=next;
+  }
+  return {ok:true,...result,settings:{...selected}};
+}
+function getAssignments() {return {ok:true,...structuredClone(STATE.recommendations)};}
+function assignRecommendations(request={}) {
+  if(!request||typeof request!=='object'||Array.isArray(request)) throw Error('INVALID_ASSIGNMENT_REQUEST');
+  const {uids,content,requestId}=request;
+  if(!Array.isArray(uids)||!uids.length||uids.length>500||uids.some(uid=>typeof uid!=='string'||!/^\d{1,32}$/.test(uid))) throw Error('INVALID_ASSIGNMENT_UIDS');
+  if(typeof content!=='string'||!content.trim()||[...content].length>2000) throw Error('INVALID_ASSIGNMENT_CONTENT');
+  if(requestId!==undefined&&(typeof requestId!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(requestId))) throw Error('INVALID_ASSIGNMENT_REQUEST_ID');
+  const settings=validateOptions(request), unique=[...new Set(uids)];
+  const previous=requestId && STATE.recommendations.assignments.find(item=>item.requestId===requestId);
+  if(previous) {
+    if(previous.content!==content||previous.levelField!==settings.levelField||previous.threshold!==settings.threshold||JSON.stringify(previous.authors.map(a=>a.uid).sort())!==JSON.stringify(unique.slice().sort())) throw Error('ASSIGNMENT_REQUEST_CONFLICT');
+    return {ok:true,assignment:structuredClone(previous),duplicate:true};
+  }
+  const classification=classifyRecommendations(STATE.records,settings), byUid=new Map(classification.users.map(user=>[user.uid,user]));
+  if(unique.some(uid=>!byUid.has(uid))) throw Error('ASSIGNMENT_USER_NOT_FOUND');
+  const assignment={id:randomUUID(),createdAt:nowMs(),content,...settings,authors:unique.map(uid=>byUid.get(uid)),...(requestId?{requestId}:{})};
+  const next={schemaVersion:1,settings,assignments:[...STATE.recommendations.assignments,assignment]};
+  saveJson(STATE.recommendationsFile,next);STATE.recommendations=next;
+  emitStream({type:'recommendation-assigned',payload:{id:assignment.id,authorCount:assignment.authors.length}});
+  return {ok:true,assignment:structuredClone(assignment)};
+}
+
 function loadJson(file, target, fallback, critical = false) {
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -140,7 +195,7 @@ function saveJson(file, obj, backup = true) {
     // Never replace a valid backup with a corrupt primary file.
     let previous;
     try { previous = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-    if (previous && (file !== STATE.recordsFile || validCollectionHistory(previous))) saveJson(`${file}.bak`, previous, false);
+    if (previous && (file !== STATE.recordsFile || validCollectionHistory(previous)) && (file !== STATE.recommendationsFile || validRecommendations(previous))) saveJson(`${file}.bak`, previous, false);
   }
   const temp = `${file}.tmp`;
   try {
@@ -243,13 +298,20 @@ function startDemoStream() {
     if (STATE.records.length > 500) STATE.records.pop();
     STATE.lastEventAt = nowMs();
     if (STATE.streamCallback) {
-      STATE.streamCallback({ type: 'record', payload: rec });
-      STATE.streamCallback({ type: 'stats', payload: getStats() });
+      emitStream({ type: 'record', payload: rec });
+      emitStream({ type: 'stats', payload: getStats() });
     }
   }, appConfig.dataFeed.sampleIntervalMs);
 }
 
 function setStreamCallback(fn) { STATE.streamCallback = fn; }
+function emitStream(event) {
+  try { STATE.streamCallback?.(event); }
+  catch (error) {
+    // Renderer delivery is advisory; it must never invalidate committed data.
+    console.error(`[data-store][stream:${event.type}]`, error?.stack || String(error));
+  }
+}
 
 // ===== 真实数据注入(房间采集器调用) =====
 // 把采集到的真实用户写入面板。去重规则:同一天同一 uid 只保留最新一条。
@@ -315,6 +377,10 @@ function ingestRealRecords(list = [], meta = {}) {
       ts,
       time: new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
     };
+    for(const field of ['wealthLevel','charmLevel']) {
+      const value=normalizeLevel(raw[field]);
+      if(value!==null) rec[field]=value;
+    }
     if (['male','female'].includes(rec.sex) && raw.sexEvidence && ['gender_badge_text','gender_badge_symbol'].includes(raw.sexEvidence.kind) && raw.sexEvidence.sex===rec.sex && Number.isFinite(raw.sexEvidence.confidence) && raw.sexEvidence.confidence>=0 && raw.sexEvidence.confidence<=1) {
       rec.sexEvidence={kind:raw.sexEvidence.kind,sex:rec.sex,confidence:raw.sexEvidence.confidence};
       const b=raw.sexEvidence.bounds;
@@ -384,8 +450,8 @@ function ingestRealRecords(list = [], meta = {}) {
   shutdown();
 
   if (STATE.streamCallback) {
-    STATE.streamCallback({ type: 'batch', payload: { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, rejected, source: 'room', room: STATE.lastCollectRoom, at: now } });
-    STATE.streamCallback({ type: 'stats', payload: getStats() });
+    emitStream({ type: 'batch', payload: { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, rejected, source: 'room', room: STATE.lastCollectRoom, at: now } });
+    emitStream({ type: 'stats', payload: getStats() });
   }
   return { added, updated, addedVerified, addedUnverified, unchanged, resolvedHints, rejected, total: STATE.records.length };
 }
@@ -394,7 +460,7 @@ function ingestRealRecords(list = [], meta = {}) {
 function reportCollectError(msg) {
   STATE.collectError = msg ? String(msg) : null;
   if (STATE.streamCallback) {
-    STATE.streamCallback({ type: 'collect-status', payload: { error: STATE.collectError, at: nowMs() } });
+    emitStream({ type: 'collect-status', payload: { error: STATE.collectError, at: nowMs() } });
   }
 }
 
@@ -403,7 +469,7 @@ function reportCollectRoom(roomName) {
   if (roomName) STATE.lastCollectRoom = roomName;
   STATE.lastCollectAt = nowMs();
   if (STATE.streamCallback) {
-    STATE.streamCallback({ type: 'collect-status', payload: { room: STATE.lastCollectRoom, at: STATE.lastCollectAt } });
+    emitStream({ type: 'collect-status', payload: { room: STATE.lastCollectRoom, at: STATE.lastCollectAt } });
   }
 }
 
@@ -419,8 +485,8 @@ function clearDemoRecords(all = false) {
   const removed = before - next.length;
   // Clearing observations preserves the selected execution mode and stream.
   if (STATE.streamCallback) {
-    STATE.streamCallback({ type: 'cleared', payload: { removed, kept: STATE.records.length, all: !!all } });
-    STATE.streamCallback({ type: 'stats', payload: getStats() });
+    emitStream({ type: 'cleared', payload: { removed, kept: STATE.records.length, all: !!all } });
+    emitStream({ type: 'stats', payload: getStats() });
   }
   return { removed, kept: STATE.records.length };
 }
@@ -446,8 +512,8 @@ function setSource(mode) {
     if (!STATE.timer) startDemoStream();
   }
   if (STATE.streamCallback) {
-    STATE.streamCallback({ type: 'source', payload: { source: STATE.source } });
-    STATE.streamCallback({ type: 'stats', payload: getStats() });
+    emitStream({ type: 'source', payload: { source: STATE.source } });
+    emitStream({ type: 'stats', payload: getStats() });
   }
   return STATE.source;
 }
@@ -627,7 +693,7 @@ function markSent(machineCode, uid) {
 
 // 系统日志(供部分模块推送)
 function pushSystemLog(level, msg) {
-  if (STATE.streamCallback) STATE.streamCallback({ type: 'log', payload: { level, msg } });
+  if (STATE.streamCallback) emitStream({ type: 'log', payload: { level, msg } });
 }
 
 function getMachineCode() {
@@ -691,6 +757,7 @@ function resolvePending({ machineCode, targetUid, runId, resolution } = {}) {
   return recordOutcome({ ...pending, outcome: resolution === 'confirmed' ? 'confirmed_ui' : 'failed', stage: 'manual_review', reason: resolution === 'confirmed' ? 'MANUALLY_CONFIRMED' : 'MANUALLY_NOT_SENT', manualResolution: resolution, evidence: { ...pending.evidence, manualReview: true, resolution } });
 }
 return {
+  getRecommendations, assignRecommendations, getAssignments,
   init, shutdown, recordOutcome, resolvePending, isPending, getPendingResults, getLegacyCounts, getConfig, setConfig, allConfig,
   getDates, getStats, getRecords, getSummary, getTargetsByHour, getStatus,
   setStreamCallback, recordSend, getCounts, isSentToday, markSent,
