@@ -528,11 +528,8 @@
             <label>等级体系<select id="recommendLevelField"><option value="wealthLevel">财富等级（图一蓝色徽章，可变色）</option><option value="charmLevel">魅力等级（图一粉色徽章，可变色）</option></select></label>
             <label>高等级阈值<input type="number" id="recommendThreshold" min="0" step="1" placeholder="请设置整数阈值"></label>
             <button class="save-btn" id="recommendRefreshBtn">保存阈值并刷新</button>
-            <button class="save-btn" id="recommendEnrichBtn">补查等级和性别（每次 10 人）</button>
-            <button class="save-btn" id="recommendEnrichStopBtn" disabled>停止补查</button>
           </div>
           <p class="field-hint" id="recommendStatus" role="status">请设置分类阈值。</p>
-          <p class="field-hint" id="recommendEnrichStatus" role="status">补查只读取公开资料，不发送私信。</p>
         </div>
         <div class="stats-row recommendation-stats">
           <div class="stat-card"><div class="stat-label">高等级用户</div><div class="stat-value" id="recommendHighCount">0</div></div>

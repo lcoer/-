@@ -37,11 +37,6 @@ app.whenReady().then(async()=>{
     }
     return result;
    };
-   const readAttributes=driver.readUserAttributes.bind(driver);
-   driver.readUserAttributes=async(uid,options)=>{
-    const attributes=await readAttributes(uid,options);
-    (report.profileAttributes ||= []).push(attributes);save();return attributes;
-   };
    const send=driver.sendPrivateMessage.bind(driver);
    driver.sendPrivateMessage=async(nickname,text,options)=>{
     report.actualCopy=text;report.actualRequestedTarget=options.expectedUid;save();
@@ -70,19 +65,6 @@ app.whenReady().then(async()=>{
   await window.loadURL(`http://127.0.0.1:${hosted.port}/index.html`);await js('window.__appReady');
   const connected=await js('window.api.system.connectEmulator()');report.environment=connected;
   if(!connected.ok||!connected.bridgeReady)throw Error(`Device unavailable: ${JSON.stringify(connected)}`);
-  if(process.env.SYBL_ACCEPTANCE_ENRICH_ONLY==='1'){
-   const seed=JSON.parse(fs.readFileSync(path.resolve(process.env.SYBL_ACCEPTANCE_SEED),'utf8'));
-   if(seed.schemaVersion!==2||!Array.isArray(seed.records))throw Error('INVALID_ENRICH_SEED');
-   store.ingestRealRecords(seed.records);
-   await js("document.querySelector('.nav-item[data-view=recommendation]').click();RecommendationView.refresh()");
-   const before=await js('window.api.recommendation.list()');await capture('enrichment-before');
-   await js('RecommendationView.enrich()');
-   const after=await js('window.api.recommendation.list()');await capture('enrichment-after');
-   const restarted=store.createDataStore({dataDir:path.join(out,'user-data')});restarted.init();
-   const restored=restarted.getRecommendations();restarted.shutdown();
-   report.cases.push({id:'E01',module:'补查',path:'历史真实UID → 推荐列表补查 → 公开主页 → 核验身份 → 分类/落盘 → 重载',expected:'低等级与性别实际读取后显示且重启一致，无消息发送',actual:{before:before.counts,after:after.counts,restored:restored.counts,stats:runner.getStatus().resolve.stats,actualGenderReads:report.profileAttributes?.filter(a=>['male','female'].includes(a.sex)).length||0},passed:after.counts.low>before.counts.low&&JSON.stringify(restored.counts)===JSON.stringify(after.counts)&&report.profileAttributes?.some(a=>['male','female'].includes(a.sex))&&report.dispatches===0});
-   report.enrichment={before,after};report.ok=report.cases.every(c=>c.passed)&&report.errors.length===0;report.verdict=report.ok?'passed_enrichment_only':'failed_enrichment';if(!report.ok)process.exitCode=2;return;
-  }
   report.cases.push({id:'R01',module:'采集',path:'实时贵宾位 → 设置多房间2/成员2页/资料卡2 → 开始实时采集',input:{maxRooms:2,maxPages:2,maxProfiles:2},expected:'启动实际采集，入库后显示记录，停止释放设备'});save();
   await js("document.getElementById('guestCollectBtn').click()");
   const requiredRounds=process.env.SYBL_ACCEPTANCE_COLLECT_ONLY==='1'?2:1;

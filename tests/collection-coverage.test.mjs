@@ -67,15 +67,3 @@ test('pre-cancelled collection does not report running or perform navigation',as
   await assert.rejects(collector.start({signal:AbortSignal.abort()}),{name:'AbortError'});
   assert.equal(collector.getStatus().running,false);
 });
-test('a partial profile retry preserves previously recognized cached attributes',async()=>{
- const meta={room:'room',roomCode:'1001',nodes:nodes('12345')};
- const collector=new RoomCollector({setSignal(){},bridge:{},readProfileLevels(){}},{scope:'single',navigator:{ensureRoom:async()=>meta,getStatus:()=>({})},scanMembers:false,clock:()=>10000,onUsers:()=>({added:0}),userResolver:async(_driver,users,opts)=>{
-  await opts.onUser({...users[0],uid:'12345',uidReal:true,sex:'unknown',wealthLevel:37,resolvedFrom:users[0].uid});
-  return {profilesRead:1,reason:'complete'};
- }});
- collector.resolvedHintCache.set('12345',{uid:'12345',sex:'female',charmLevel:103,at:1000,retryAfter:0});
- collector.stopped=false;await collector._collectOnce();
- assert.equal(collector.resolvedHintCache.get('12345').sex,'female');
- assert.equal(collector.resolvedHintCache.get('12345').charmLevel,103);
- assert.equal(collector.resolvedHintCache.get('12345').wealthLevel,37);
-});

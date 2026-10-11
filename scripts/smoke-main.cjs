@@ -7,29 +7,22 @@ const productRoot = process.env.SYBL_SMOKE_APP_ROOT || path.resolve(__dirname, '
 const load = file => require(path.join(productRoot, file));
 if (!out)
   throw Error('Run through npm run smoke');
-fs.mkdirSync(out, { recursive: true });
-const smokeUserData=fs.mkdtempSync(path.join(out,'user-data-'));
-app.setPath('userData', smokeUserData);
+fs.mkdirSync(path.join(out, 'user-data'), { recursive: true });
+app.setPath('userData', path.join(out, 'user-data'));
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('no-sandbox');
 app.whenReady().then(async () => {
   const store = load('electron/services/data-store.js');
   const manager = load('electron/services/client-manager.js');
-  let smokeEnrichmentEnabled=false;
   manager.getHealth = async () => ({ emulatorConnected: false, mode: 'disconnected', serial: null, bridgeReady: false, appInstalled: false });
   manager.ensureClient = async () => {
-    if(smokeEnrichmentEnabled)return {mode:'android',serial:'smoke-profile-device'};
     throw Error('SMOKE_DEVICE_DISABLED');
   };
   store.init();
-  const runnerFile=path.join(productRoot,'electron/services/task-runner.js');
-  const smokeRunner=load('electron/services/task-runner.js').createTaskRunner({dataStore:store,clientManager:manager,createDriver:async()=>({ensureReady:async()=>{},readUserAttributes:async uid=>({uid,uidReal:true,nickname:'补查样本',sex:'male',wealthLevel:37,charmLevel:103})})});
-  require.cache[require.resolve(runnerFile)].exports=smokeRunner;
   const { startStaticServer } = load('electron/services/static-server.js');
   const { server, port } = await startStaticServer({ port: 0 });
   const win = new BrowserWindow({ width: 1360, height: 860, show: false, webPreferences: { preload: path.join(productRoot, 'electron/preload.js'), contextIsolation: true, nodeIntegration: false, offscreen: true, backgroundThrottling: false } });
   const ctx = { getMainWindow: () => win };
-  smokeRunner.setStatusCallback(status=>win.webContents.send('task:status',status));
   const errors = [];
   win.webContents.on('console-message', (_e, level, message) => {
     if (level >= 3 && !message.includes('net::ERR'))
@@ -96,10 +89,7 @@ app.whenReady().then(async () => {
       await window.api.config.set('settings',{executionMode:'demo'});
       const originalConfirm=Dialog.confirm;let confirmations=0;
       Dialog.confirm=async()=>{confirmations++;await new Promise(resolve=>setTimeout(resolve,120));return false;};
-      const button=document.getElementById('taskPrivateStart');
-      const modeDeadline=Date.now()+3000;
-      while(button.disabled){if(Date.now()>modeDeadline)throw Error('Mode change did not release start control');await new Promise(resolve=>setTimeout(resolve,30));}
-      button.click();button.click();
+      const button=document.getElementById('taskPrivateStart');button.click();button.click();
       const cancelDeadline=Date.now()+3000;
       while(button.disabled){if(Date.now()>cancelDeadline)throw Error('Preparation did not settle');await new Promise(resolve=>setTimeout(resolve,30));}
       const oneConfirmation=confirmations===1;
@@ -145,17 +135,7 @@ app.whenReady().then(async () => {
       if((await window.api.recommendation.assignments()).assignments.length!==before)throw Error('Empty repeat assignment saved');
       return {recommendationClassification:true,recommendationSelection:true,authorAssignment:true};
     })()`));
-    smokeEnrichmentEnabled=true;
-    Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
-      await RecommendationView.enrich();
-      const list=await window.api.recommendation.list();
-      const enriched=list.users.find(user=>user.uid==='810004');
-      if(enriched?.group!=='low'||enriched.sex!=='male')throw Error('Historical profile enrichment did not update classification');
-      if(!document.getElementById('recommendEnrichStopBtn').disabled)throw Error('Enrichment stop control did not settle');
-      return {historicalProfileEnrichment:true};
-    })()`));
-    smokeEnrichmentEnabled=false;
-    const reload=store.createDataStore({dataDir:smokeUserData});reload.init();
+    const reload=store.createDataStore({dataDir:path.join(out,'user-data')});reload.init();
     if(!reload.getAssignments().assignments.some(item=>item.authors.some(author=>author.uid==='810002')))throw Error('Author assignment did not survive restart');
     reload.shutdown();checks.assignmentRestart=true;
     for (const view of ['ranking', 'recommendation', 'rules', 'task', 'copywriting', 'blacklist', 'settings']) {

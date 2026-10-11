@@ -24,22 +24,13 @@ function classifyRecommendations(records, options) {
     if (prior) {
       prior.indexes.push(index);
       if (time >= prior.time) Object.assign(prior, {record,time,index});
-    } else latest.set(record.uid,{record,time,index,indexes:[index],attributes:{},attributeSources:{}});
-    const entry=latest.get(record.uid);
-    for(const field of [...LEVEL_FIELDS,'sex']) {
-      const value=field==='sex'?(['male','female','other'].includes(record.sex)?record.sex:null):normalizeLevel(record[field]);
-      if(value!==null && (!entry.attributeSources[field] || time>=entry.attributeSources[field].observedAt)) {
-        entry.attributes[field]=value;
-        entry.attributeSources[field]={sourceRecordIndex:index,observedAt:time};
-      }
-    }
+    } else latest.set(record.uid,{record,time,index,indexes:[index]});
   });
   const groups = {high:[],low:[],unclassified:[]};
-  for (const {record,index,indexes,attributes,attributeSources} of latest.values()) {
-    const level = normalizeLevel(attributes[levelField]), levelHidden = level === '?';
+  for (const {record,index,indexes} of latest.values()) {
+    const level = normalizeLevel(record[levelField]), levelHidden = level === '?';
     const group = levelHidden || (level !== null && level >= threshold) ? 'high' : level === null ? 'unclassified' : 'low';
-    groups[group].push({uid:record.uid,nickname:record.nickname,sex:attributes.sex||'unknown',level,levelHidden,group,
-      attributeValues:structuredClone(attributes),attributeSources:structuredClone(attributeSources),
+    groups[group].push({uid:record.uid,nickname:record.nickname,sex:record.sex,level,levelHidden,group,
       original:structuredClone(record),sourceRecordIndex:index,sourceRecordIndexes:indexes});
   }
   const sort = (a,b) => Number(b.levelHidden)-Number(a.levelHidden) || (b.level ?? -1)-(a.level ?? -1) || a.uid.localeCompare(b.uid);

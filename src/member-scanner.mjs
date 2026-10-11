@@ -51,8 +51,6 @@ export async function scanRoomMembers(driver, { room, roomCode, signal, maxPages
   const tap = async (n) => {
     const r = rect(n);
     throwIfAborted(signal);
-    if(id(n)&&typeof driver.bridge.tapById==='function'&&nodes.filter(node=>id(node)===id(n)).length===1)
-      return driver.bridge.tapById(id(n),{signal,timeout:Math.min(remaining(),1500)});
     return driver.bridge.tapByCoord((r.x + r.x2) / 2, (r.y + r.y2) / 2, { signal, timeout: Math.min(remaining(), 1500) });
   };
   try {

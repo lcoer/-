@@ -24,18 +24,6 @@ test('failed first card is skipped and verified second room is entered',async()=
  const d=device({fail:new Set(['A'])});const n=new RoomNavigator(d.driver,{entryTimeoutMs:5,pollIntervalMs:1});
  assert.equal((await n.nextRoom()).room,'B');assert.deepEqual(d.clicks,['tv_room_name:A','tv_room_name:B']);assert.equal(n.getStatus().failed,1);
 });
-test('room entry uses the observed unique text action when coordinate taps do not respond',async()=>{
- let current=home(['Unique room']),coordinateTaps=0,textClicks=0;
- const driver={bridge:{dumpUi:async()=>({nodes:current}),clickText:async text=>{assert.equal(text,'Unique room');textClicks++;current=room(text);return {ok:true,via:'ACTION_CLICK'};}},adb:{screenSize:async()=>({w:1080,h:1920}),tap:async()=>coordinateTaps++,swipe:async()=>{}}};
- const nav=new RoomNavigator(driver,{entryTimeoutMs:20,pollIntervalMs:1});
- assert.equal((await nav.ensureRoom()).room,'Unique room');assert.equal(textClicks,1);assert.equal(coordinateTaps,0);
-});
-test('unconfirmed text action is never retried as a coordinate tap',async()=>{
- const d=device({names:['Unique room']});let clicks=0;
- d.driver.bridge.clickText=async()=>{clicks++;return {ok:false,error:'ACTION_REJECTED'};};
- const nav=new RoomNavigator(d.driver,{entryTimeoutMs:10,pollIntervalMs:1});
- assert.equal(await nav.nextRoom(),null);assert.equal(clicks,1);assert.equal(d.clicks.length,0);
-});
 test('a scrolled home feed is recognized without an offscreen recommended header',async()=>{
  const d=device();
  d.setNodes([

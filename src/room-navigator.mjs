@@ -42,7 +42,6 @@ export class RoomNavigator {
   async _snapshot() {
     throwIfAborted(this.signal);
     const { nodes } = await this.driver.bridge.dumpUi({ signal: this.signal });
-    this.rawNodes=nodes;
     throwIfAborted(this.signal);
     // wm size can report the physical landscape panel while Android uses portrait.
     const root = nodes[0];
@@ -175,16 +174,6 @@ export class RoomNavigator {
       throw new Error('ROOM_NAVIGATION_INVALID_TARGET');
     if (node.shortId === 'tv_room_name' || node.shortId === 'iv_quit')
       this.homeConfirmed = false;
-    if(node.shortId==='tv_room_name'&&typeof this.driver.bridge?.clickText==='function') {
-      // A label's physical coordinates may be intercepted by the card layout.
-      // Invoke its clickable ancestor, only for one exact observed text match.
-      const matches=(this.rawNodes||[]).filter(n=>typeof n.text==='string'&&n.text.includes(node.text));
-      if(matches.length!==1||matches[0].shortId!=='tv_room_name'||matches[0].text!==node.text||!this._visible(matches[0]))throw Error('ROOM_NAVIGATION_AMBIGUOUS_ROOM');
-      const result=await this.driver.bridge.clickText(node.text,{signal:this.signal,timeout:4000});
-      throwIfAborted(this.signal);
-      if(!result?.ok)throw Error(`ROOM_NAVIGATION_CLICK_UNCONFIRMED: ${result?.error||'UNKNOWN'}`);
-      return;
-    }
     await this.driver.adb.tap((node.x + node.x2) / 2, (node.y + node.y2) / 2);
     throwIfAborted(this.signal);
   }

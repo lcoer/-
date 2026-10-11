@@ -91,29 +91,6 @@ export class AndroidDriver {
   async readProfileLevels(nodes,options={}) { return readProfileLevels(this,nodes,{signal:this.signal,...options}); }
   async readProfileGender(nodes,options={}) { return readProfileGender(this,nodes,{signal:this.signal,...options}); }
 
-  // Public profile read only: never enters chat, follows a user or sends anything.
-  async readUserAttributes(uid,{signal=this.signal,navigationOptions={}}={}) {
-    if(typeof uid!=='string'||!/^\d{1,32}$/.test(uid))throw Error('EXPECTED_REAL_UID_REQUIRED');
-    throwIfAborted(signal);
-    const navigator=new PrivateNavigator(this,{...navigationOptions,signal,onLog:(level,msg)=>this.log(level,msg)});
-    await navigator.openProfile(uid,{requireRealUid:true});
-    const profile=await navigator.readProfile(uid);
-    const options={expectedUid:String(uid),expectedNickname:profile.nickname,signal};
-    const gender=await this.readProfileGender(profile.nodes,options);throwIfAborted(signal);
-    const fresh=await navigator.readProfile(uid);
-    if(fresh.nickname!==profile.nickname)throw Error('PROFILE_CONTEXT_CHANGED');
-    const levels=await this.readProfileLevels(fresh.nodes,options);throwIfAborted(signal);
-    const final=await navigator.readProfile(uid);
-    if(final.nickname!==profile.nickname)throw Error('PROFILE_CONTEXT_CHANGED');
-    const attributes={uid:String(uid),nickname:profile.nickname,uidReal:true};
-    if(['male','female'].includes(gender.sex)){attributes.sex=gender.sex;if(gender.evidence)attributes.sexEvidence=gender.evidence;}
-    for(const field of ['wealthLevel','charmLevel']) {
-      if(levels[field]==='?'||(Number.isSafeInteger(levels[field])&&levels[field]>=0))attributes[field]=levels[field];
-      if(levels[`${field}Hidden`]===true)attributes[`${field}Hidden`]=true;
-    }
-    return attributes;
-  }
-
   async launchApp() { return this.adb.launchApp(); }
 
   // ===== dump:自动选择方案 =====

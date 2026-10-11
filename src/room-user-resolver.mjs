@@ -60,7 +60,7 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
       reason = 'max_duration';
       break;
     }
-    let opened = false, tapped = false, nodes = [];
+    let opened = false, nodes = [];
     try {
       nodes = await read();
       if (!roomPage(nodes)) {
@@ -79,16 +79,10 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
       attemptHistory.set(attemptKey(user),++ordinal);
       const r = bounds(seats[0]);
       throwIfAborted(signal);
-      let clicked;
-      if(typeof driver.bridge.clickText==='function') {
-        const matches=nodes.filter(n=>text(n).includes(user.nickname));
-        if(matches.length!==1||matches[0]!==seats[0])continue;
-        clicked=await driver.bridge.clickText(user.nickname,{signal,timeout:Math.min(remaining(),1500)});
-      }else clicked=await driver.bridge.tapByCoord((r.x + r.x2) / 2, (r.y + r.y2) / 2, { signal, timeout: Math.min(remaining(), 1500) });
+      const clicked = await driver.bridge.tapByCoord((r.x + r.x2) / 2, (r.y + r.y2) / 2, { signal, timeout: Math.min(remaining(), 1500) });
       throwIfAborted(signal);
       if (!clicked?.ok)
         continue;
-      tapped = true;
       profilesRead++;
       // A card may briefly have blank fields; wait only within the profile and total budgets.
       const before = resolved.length, cardDeadline = Math.min(deadline, Date.now() + 1800);
@@ -141,7 +135,7 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
       onLog('warn', `公开资料读取未完成: ${error.message}`);
     }
     finally {
-      if (tapped && !signal?.aborted) {
+      if (opened && !signal?.aborted) {
         try {
           // Back is authorized only by a fresh recognizable card, never by the earlier tap.
           const fresh = await driver.bridge.dumpUi({ signal, retries: 0, timeout: 1200 });

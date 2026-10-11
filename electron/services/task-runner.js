@@ -4,7 +4,6 @@ const { pathToFileURL } = require('url');
 const { randomUUID } = require('crypto');
 const { DeviceSession } = require('./device-session');
 const { isDefinitiveSendRejection } = require('../../src/send-proof.cjs');
-const {normalizeLevel} = require('../../src/recommendation-policy.cjs');
 const modulePath = name => pathToFileURL(path.join(__dirname, '..', '..', 'src', name)).href;
 const modules = Promise.all(['task-policy.mjs', 'task-result.mjs'].map(n => import(modulePath(n))));
 function cancelled(signal) {
@@ -51,7 +50,6 @@ function createTaskRunner(deps = {}) {
     return new RoomCollector(drv, opts);
   });
   const session = new DeviceSession(), tasks = new Map();
-  const enrichmentAttempts=new Map();let enrichmentOrdinal=0;
   let logCallback = null, statusCallback = null, collector = null, collectorRunId = null, statusRevision = 0;
   const emptyStats = () => ({
     sent: 0, ok: 0, fail: 0, unconfirmed: 0, cancelled: 0, skipped: 0, simulated: 0, clicked: 0
@@ -114,7 +112,6 @@ function createTaskRunner(deps = {}) {
   }
   async function readyDriver(t) {
     // The chosen serial stays fixed for the run; readiness checks never send messages.
-    if(t.name==='collect'){t.stats.phase='connecting';log('collect','info','正在连接模拟器并检查运行环境');emitStatus();}
     const signal = t.controller.signal, info = await clientManager.ensureClient({ signal, onLog: (l, m) => log('system', l, m) });
     cancelled(signal);
     if (!info || info.mode !== 'android' || !info.serial)
@@ -123,7 +120,6 @@ function createTaskRunner(deps = {}) {
     t.deviceInfo = info;
     cancelled(signal);
     drv.setSignal?.(signal);
-    if(t.name==='collect'){t.stats.phase='checking_environment';log('collect','info','正在检查应用和采集桥接服务');emitStatus();}
     await drv.ensureReady();
     if (drv.bridge?.ensureCompatible) {
       const handshake = await drv.bridge.ensureCompatible({ signal });
@@ -131,7 +127,6 @@ function createTaskRunner(deps = {}) {
     }
     cancelled(signal);
     t.driver = drv;
-    if(t.name==='collect'){t.stats.phase='preparing_collection';emitStatus();}
     return drv;
   }
   function launch(name, config, initialize, execute) {
@@ -340,12 +335,9 @@ function createTaskRunner(deps = {}) {
       collector = await createCollector(drv, {
         intervalMs, scope, maxRooms, maxPages, maxProfiles, roomName: opts.roomName || null, signal: t.controller.signal,
         ...(dataStore.getCollectionCoverage?.() || {}),
-        onProgress: progress => {
-          if (!t.controller.signal.aborted) {
-            if(progress?.waitingForNextCycle)t.stats.phase=progress.navigationStatus==='retry'?'waiting_for_room':'waiting_cycle';
-            else if(progress?.room)t.stats.phase='collecting';
+        onProgress: () => {
+          if (!t.controller.signal.aborted)
             emitStatus();
-          }
         },
         onLog: (l, m) => log('collect', l, m), onUsers: (users, meta) => {
           if (!t.controller.signal.aborted) {
@@ -353,11 +345,8 @@ function createTaskRunner(deps = {}) {
           }
         },
         onRoom: room => {
-          if (!t.controller.signal.aborted) {
-            t.stats.phase='collecting';
+          if (!t.controller.signal.aborted)
             dataStore.reportCollectRoom?.(room);
-            emitStatus();
-          }
         }, onError: msg => {
           if (!t.controller.signal.aborted)
             dataStore.reportCollectError?.(msg);
@@ -368,16 +357,10 @@ function createTaskRunner(deps = {}) {
       t.cleanup = () => currentCollector.stop();
       cancelled(t.controller.signal);
       dataStore.setSource('room');
-      return {collector:currentCollector,intervalMs};
-    }, async (t, {collector:c,intervalMs}) => {
+      await currentCollector.start({ intervalMs, signal: t.controller.signal });
+      return currentCollector;
+    }, async (t, c) => {
       try {
-        cancelled(t.controller.signal);
-        t.stats.phase='entering_room';
-        log('collect','info','采集引擎已启动，正在等待确认进入房间；尚未采集到用户时不会生成数据');
-        emitStatus();
-        const started=await c.start({intervalMs,signal:t.controller.signal});
-        cancelled(t.controller.signal);
-        if(started?.ok===false)throw Error(started.reason||'COLLECT_ENGINE_START_FAILED');
         await untilAbort(t.controller.signal);
       }
       finally {
@@ -390,7 +373,7 @@ function createTaskRunner(deps = {}) {
   }
   function getCollectStatus() {
     const t = tasks.get('collect');
-    return { ok: true, ...(collector && collectorRunId === t.runId ? collector.getStatus() : { rounds: 0 }), phase:t.stats.phase, error:t.error||null,running: t.running, state: t.state, statusRevision, source: dataStore.getStatus().source };
+    return { ok: true, ...(collector && collectorRunId === t.runId ? collector.getStatus() : { rounds: 0 }), running: t.running, state: t.state, statusRevision, source: dataStore.getStatus().source };
   }
   async function resolveNicknames(uids = []) {
     let run;
@@ -410,57 +393,6 @@ function createTaskRunner(deps = {}) {
     await run.loop;
     return run.result || { ok: false, reason: run.error || 'CANCELLED' };
   }
-  async function enrichRecommendations(options={}) {
-    if(!options||typeof options!=='object'||Array.isArray(options))return {ok:false,reason:'INVALID_ENRICH_OPTIONS'};
-    const limit=options.limit??10;
-    if(!Number.isInteger(limit)||limit<1||limit>30)return {ok:false,reason:'INVALID_ENRICH_LIMIT'};
-    let run;
-    const response=await launch('resolve',{executionMode:'android'},async t=>{
-      if(dataStore.getConfig?.('settings')?.executionMode==='demo')throw Error('REAL_MODE_REQUIRED');
-      if(dataStore.getStatus().collectionRecoveryRequired)throw Error('DATA_RECOVERY_REQUIRED');
-      const users=dataStore.getRecommendations().users.filter(user=> {
-        const attributes=user.attributeValues||user.original;
-        return !['male','female'].includes(user.sex)||(normalizeLevel(attributes.wealthLevel)===null&&attributes.wealthLevelHidden!==true);
-      }).sort((a,b)=>(enrichmentAttempts.get(a.uid)||0)-(enrichmentAttempts.get(b.uid)||0)).slice(0,limit);
-      if(!users.length)throw Error('NO_USERS_TO_ENRICH');
-      await readyDriver(t);
-      if(typeof t.driver.readUserAttributes!=='function')throw Error('PROFILE_ENRICH_UNAVAILABLE');
-      run=t;t.stats={...t.stats,phase:'enriching',total:users.length,processed:0,enriched:0};
-      return users;
-    },async(t,users)=>{
-      const signal=t.controller.signal;
-      for(const user of users) {
-        cancelled(signal);t.stats.currentUid=user.uid;emitStatus();
-        enrichmentAttempts.set(user.uid,++enrichmentOrdinal);
-        log('resolve','info',`补查用户资料 ${t.stats.processed+1}/${users.length}：${user.uid}`);
-        let attributes;
-        try {
-          attributes=await t.driver.readUserAttributes(user.uid,{signal});cancelled(signal);
-          if(attributes?.uid!==user.uid||attributes.uidReal!==true||typeof attributes.nickname!=='string'||!attributes.nickname.trim())throw Error('PROFILE_IDENTITY_MISMATCH');
-        }catch(error){
-          cancelled(signal);if(error.name==='AbortError')throw error;
-          t.stats.fail++;t.stats.processed++;log('resolve','warn',`用户 ${user.uid} 补查失败：${error.message}`);emitStatus();continue;
-        }
-        const patch={};
-        if(['male','female'].includes(attributes.sex)){patch.sex=attributes.sex;if(attributes.sexEvidence)patch.sexEvidence=attributes.sexEvidence;}
-        for(const field of ['wealthLevel','charmLevel']) {
-          const value=normalizeLevel(attributes[field]);if(value!==null)patch[field]=value;
-          if(attributes[`${field}Hidden`]===true)patch[`${field}Hidden`]=true;
-        }
-        cancelled(signal);
-        if(Object.keys(patch).length) {
-          const record={...user.original,...patch,uid:user.uid,uidReal:true,nickname:attributes.nickname,lastSeenAt:Date.now()};
-          dataStore.ingestRealRecords([record],{room:user.original.room,roomCode:user.original.roomCode});
-          t.stats.enriched++;log('resolve','ok',`用户 ${user.uid} 资料已补充`);
-        }else {t.stats.skipped++;log('resolve','warn',`用户 ${user.uid} 暂未读到性别或等级，保留原始资料`);}
-        t.stats.processed++;emitStatus();
-      }
-      return {ok:true,total:users.length,processed:t.stats.processed,enriched:t.stats.enriched,failed:t.stats.fail,skipped:t.stats.skipped};
-    });
-    if(!response.ok)return response;
-    await run.loop;
-    return run.result||{ok:false,reason:run.error||'CANCELLED',processed:run.stats.processed,enriched:run.stats.enriched};
-  }
   async function withDeviceOperation(name, action) {
     let run;
     const response = await launch(name, { executionMode: 'android' }, async (t) => {
@@ -478,7 +410,7 @@ function createTaskRunner(deps = {}) {
     return { ok: true, ...getStatus() };
   }
   return {
-    start, stop, stopAll, waitForIdle, getStatus, startCollect, stopCollect, getCollectStatus, resolveNicknames, enrichRecommendations, withDeviceOperation, refreshDriver, setLogCallback: fn => {
+    start, stop, stopAll, waitForIdle, getStatus, startCollect, stopCollect, getCollectStatus, resolveNicknames, withDeviceOperation, refreshDriver, setLogCallback: fn => {
       logCallback = fn;
     }, setStatusCallback: fn => {
       statusCallback = fn;

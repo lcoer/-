@@ -67,34 +67,3 @@ test('actual zero-level numeral remains distinct from its diamond and heart icon
  for(let y=0;y<image.height;y++)for(let x=60;x<image.width;x++)if(x<130||x>198){const p=(y*image.width+x)*4;image.data[p]=image.data[p+1]=image.data[p+2]=0;}
  assert.deepEqual(readLevelDigits(image,roi).values,{});
 });
-
-test('level capture uses fresh geometry after gender and retries one same-identity layout change',async()=>{
- const png=fs.readFileSync(new URL('./fixtures/levels/numeric.png',import.meta.url));
- const shift=(frame,offset)=>frame.map(node=>['tv_nickname','tv_age','tv_online_status'].includes(node.shortId)?{...node,y:node.y+offset,y2:node.y2+offset}:node);
- const moved=shift(nodes,40),settled=shift(nodes,80);let dumps=0,captures=0;const regions=[];
- const driver={adb:{screenshotBuffer:async()=>{captures++;return png;}},bridge:{dumpUi:async()=>({nodes:++dumps===1?moved:settled})}};
- const result=await readProfileLevels(driver,nodes,{...options,ocr:async(_png,roi)=>{regions.push(roi);return [{text:'12',x:100,y:20,width:60,height:40},{text:'33',x:900,y:20,width:60,height:40}];}});
- assert.equal(captures,2);assert.equal(result.wealthLevel,12);assert.equal(result.charmLevel,33);assert.equal(regions[0].y,profileLevelRegion(settled,options.expectedUid,options.expectedNickname).y);
-});
-test('foreign snapshot and cancelled layout retry never authorize level classification',async()=>{
- const png=fs.readFileSync(new URL('./fixtures/levels/numeric.png',import.meta.url));let captures=0;
- const driver={adb:{screenshotBuffer:async()=>{captures++;return png;}},bridge:{dumpUi:async()=>({nodes:nodes.map((n,i)=>i===0?{...n,packageName:'com.android.systemui'}:n)})}};
- const denied=await readProfileLevels(driver,nodes,options);assert.equal(denied.wealthLevel,undefined);assert.equal(captures,0);
- const controller=new AbortController();driver.bridge.dumpUi=async()=>{controller.abort();return {nodes};};
- await assert.rejects(readProfileLevels(driver,nodes,{...options,signal:controller.signal}),{name:'AbortError'});
-});
-
-test('complete public profile region anchors below ID/age and before signature',()=>{
- const full=[n('','',{packageName:'com.sybl.voiceroom',x:0,y:0,x2:1080,y2:1920}),n('tv_nickname','A',{x:147,y:847,x2:254,y2:924}),n('tv_user_code','12345678',{x:117,y:947,x2:245,y2:986}),n('tv_age','24',{x:366,y:949,x2:420,y2:988}),n('tv_sign','signature',{x:123,y:1099,x2:991,y2:1151}),n('iv_follow','',{x:58,y:1696,x2:441,y2:1834}),n('iv_chat','',{x:476,y:1696,x2:1023,y2:1834})];
- assert.deepEqual(profileLevelRegion(full,'12345678','A'),{x:54,y:1004,width:302,height:85});
- assert.equal(profileLevelRegion(full.filter(n=>n.shortId!=='iv_chat'),'12345678','A'),null);
- assert.equal(profileLevelRegion(full.map(n=>n.shortId==='tv_user_code'?{...n,shortId:'tv_nice_num'}:n),'12345678','A'),null);
-});
-test('independent full-profile cropped low numeral and hidden badges retain proper meanings',()=>{
- const roi={x:0,y:0,width:302,height:85};
- const low=fs.readFileSync(new URL('./fixtures/levels/full-low-0-84.png',import.meta.url));
- const hidden=fs.readFileSync(new URL('./fixtures/levels/full-hidden.png',import.meta.url));
- assert.equal(readLevelDigits(low,roi).values.wealthLevel,0);
- assert.deepEqual(hiddenLevelSides(low,roi),[]);
- assert.deepEqual(hiddenLevelSides(hidden,roi),[0,1]);
-});

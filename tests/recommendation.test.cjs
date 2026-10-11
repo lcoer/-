@@ -5,16 +5,6 @@ const path=require('node:path');
 const {classifyRecommendations,normalizeLevel}=require('../src/recommendation-policy.cjs');
 const {createDataStore}=require('../electron/services/data-store');
 const options={levelField:'wealthLevel',threshold:30};
-test('a later incomplete sighting does not erase previously observed attributes of the same verified UID',()=>{
- const records=[{uid:'123',source:'room',uidReal:true,sex:'female',wealthLevel:37,charmLevel:103,ts:1000},
-  {uid:'123',source:'room',uidReal:true,sex:'unknown',ts:2000}];
- const result=classifyRecommendations(records,{levelField:'wealthLevel',threshold:54});
- assert.equal(result.users[0].group,'low');assert.equal(result.users[0].sex,'female');
- assert.equal(result.users[0].attributeValues.wealthLevel,37);
- assert.equal(result.users[0].attributeSources.wealthLevel.sourceRecordIndex,0);
- assert.equal(result.users[0].original.wealthLevel,undefined);
- assert.equal(records[1].wealthLevel,undefined);
-});
 test('recommendations sort hidden and numeric levels, deduplicate real UID and keep source traces',()=>{
  const base={source:'room',uidReal:true,nickname:'fixture'};
  const result=classifyRecommendations([

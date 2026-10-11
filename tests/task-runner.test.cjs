@@ -12,41 +12,6 @@ function setup(overrides = {}) {
   return { outcomes, runner: createTaskRunner({dataStore:ds,clientManager:cm,createDriver:async()=>drv,createCollector:overrides.createCollector}) };
 }
 
-const enrichmentUser=uid=>({uid,sex:'unknown',original:{uid,uidReal:true,source:'room',nickname:'fixture',room:'original room',roomCode:'99',ts:1000}});
-test('public enrichment writes verified missing attributes with original trace and never invokes sender',async()=>{
- const writes=[],calls=[];
- const {runner}=setup({store:{getRecommendations:()=>({users:[enrichmentUser('12345'),enrichmentUser('23456')]}),ingestRealRecords:records=>writes.push(...records)},driver:{readUserAttributes:async uid=>{calls.push(uid);return {uid,uidReal:true,nickname:'fresh',sex:'female',wealthLevel:53};},sendPrivateMessage:async()=>{throw Error('unexpected sender');}}});
- const result=await runner.enrichRecommendations({limit:1});assert.equal(result.enriched,1);assert.deepEqual(calls,['12345']);
- assert.equal(writes[0].room,'original room');assert.equal(writes[0].roomCode,'99');assert.equal(writes[0].ts,1000);assert.equal(writes[0].wealthLevel,53);
- assert.equal(runner.getStatus().deviceOwner,null);
-});
-test('enrichment skips missing identities, respects last-known attributes and fails before connecting for bad input or recovery',async()=>{
- let connections=0;const writes=[];
- const users=[enrichmentUser('12345'),enrichmentUser('23456')];
- const {runner}=setup({store:{getRecommendations:()=>({users}),ingestRealRecords:records=>writes.push(...records)},driver:{readUserAttributes:async()=>({uid:'99999',uidReal:true,nickname:'wrong',wealthLevel:1})}});
- const result=await runner.enrichRecommendations();assert.equal(result.failed,2);assert.equal(writes.length,0);
- const complete={...enrichmentUser('12345'),sex:'female',attributeValues:{wealthLevel:99,sex:'female'}};
- const other=setup({store:{getRecommendations:()=>({users:[complete]})},client:{ensureClient:async()=>{connections++;throw Error('unexpected');}}}).runner;
- assert.equal((await other.enrichRecommendations()).reason,'NO_USERS_TO_ENRICH');
- for(const limit of [0,31,1.5,'10'])assert.equal((await other.enrichRecommendations({limit})).reason,'INVALID_ENRICH_LIMIT');
- const corrupt=setup({store:{getStatus:()=>({collectionRecoveryRequired:true})},client:{ensureClient:async()=>{connections++;}}}).runner;
- assert.equal((await corrupt.enrichRecommendations()).reason,'DATA_RECOVERY_REQUIRED');assert.equal(connections,0);
-});
-test('enrichment holds resolve lease through cancellation and ignores returned attributes after stop',async()=>{
- const writes=[];let release;
- const {runner}=setup({store:{getRecommendations:()=>({users:[enrichmentUser('12345')]}),ingestRealRecords:records=>writes.push(...records)},driver:{readUserAttributes:async()=>new Promise(resolve=>{release=()=>resolve({uid:'12345',uidReal:true,nickname:'fixture',wealthLevel:20});})}});
- const operation=runner.enrichRecommendations();await tick();
- assert.equal((await runner.start('private',cfg())).reason,'DEVICE_BUSY');
- const stop=runner.stop('resolve');await tick();assert.equal(writes.length,0);assert.equal(runner.getStatus().resolve.state,'stopping');
- release();await stop;assert.equal((await operation).reason,'CANCELLED');assert.equal(writes.length,0);assert.equal(runner.getStatus().deviceOwner,null);
-});
-test('failed or partially read first batch cannot starve later enrichment candidates',async()=>{
- const calls=[],users=['12345','23456','34567'].map(enrichmentUser);
- const {runner}=setup({store:{getRecommendations:()=>({users})},driver:{readUserAttributes:async uid=>{calls.push(uid);throw Error('temporarily unreadable');}}});
- await runner.enrichRecommendations({limit:1});await runner.enrichRecommendations({limit:1});await runner.enrichRecommendations({limit:1});await runner.enrichRecommendations({limit:1});
- assert.deepEqual(calls,['12345','23456','34567','12345']);
-});
-
 test('acceptance rejects bad blacklist and long copy before connecting', async () => {
   let connects = 0;
   const {runner} = setup({client:{ensureClient:async()=>{connects++;throw Error('unexpected');}}});
@@ -261,22 +226,6 @@ test('collector startup cancellation stops constructed collector before releasin
   assert.equal(runner.getStatus().deviceOwner.owner,'collect');
   finishStart({ok:true});await starting;await stopping;
   assert.equal(stopped,1);assert.equal(runner.getStatus().deviceOwner,null);
-});
-test('collection acknowledges engine startup before first room scan settles and cancellation prevents data writes',async()=>{
- let scanStarted=false,abortScan,stops=0,writes=0;
- const {runner}=setup({store:{ingestRealRecords:()=>{writes++;}},createCollector:async(_driver,options)=>({
-  start:async({signal})=>{scanStarted=true;await new Promise(resolve=>{abortScan=resolve;signal.addEventListener('abort',resolve,{once:true});});options.onUsers([{uid:'12345'}],{});return {ok:true};},
-  stop:async()=>{stops++;abortScan?.();},getStatus:()=>({rounds:0,roomsVisited:0})})});
- const response=await runner.startCollect({intervalMs:1000});assert.equal(response.ok,true);assert.equal(scanStarted,true);
- assert.equal(runner.getStatus().collect.state,'running');assert.equal(runner.getStatus().collect.stats.phase,'entering_room');
- assert.equal(runner.getCollectStatus().phase,'entering_room');
- await runner.stopCollect();assert.equal(stops,1);assert.equal(writes,0);assert.equal(runner.getStatus().deviceOwner,null);
-});
-test('collection environment failure never starts engine and resets running state',async()=>{
- let creates=0;
- const {runner}=setup({driver:{ensureReady:async()=>{throw Error('BRIDGE_NOT_ENABLED');}},createCollector:async()=>{creates++;}});
- const response=await runner.startCollect();assert.equal(response.ok,false);assert.match(response.reason,/BRIDGE_NOT_ENABLED/);
- assert.equal(creates,0);assert.equal(runner.getStatus().collect.running,false);assert.equal(runner.getStatus().collect.state,'failed');assert.equal(runner.getStatus().deviceOwner,null);
 });
 test('dispatch intent followed by returned cancellation remains unconfirmed',async()=>{
   const {runner,outcomes}=setup({driver:{sendPrivateMessage:async(n,t,opts)=>{await opts.onBeforeSend();return {outcome:'cancelled'};}}});
