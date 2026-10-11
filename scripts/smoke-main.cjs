@@ -96,7 +96,10 @@ app.whenReady().then(async () => {
       await window.api.config.set('settings',{executionMode:'demo'});
       const originalConfirm=Dialog.confirm;let confirmations=0;
       Dialog.confirm=async()=>{confirmations++;await new Promise(resolve=>setTimeout(resolve,120));return false;};
-      const button=document.getElementById('taskPrivateStart');button.click();button.click();
+      const button=document.getElementById('taskPrivateStart');
+      const modeDeadline=Date.now()+3000;
+      while(button.disabled){if(Date.now()>modeDeadline)throw Error('Mode change did not release start control');await new Promise(resolve=>setTimeout(resolve,30));}
+      button.click();button.click();
       const cancelDeadline=Date.now()+3000;
       while(button.disabled){if(Date.now()>cancelDeadline)throw Error('Preparation did not settle');await new Promise(resolve=>setTimeout(resolve,30));}
       const oneConfirmation=confirmations===1;

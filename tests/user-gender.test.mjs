@@ -4,6 +4,20 @@ import fs from 'node:fs';
 const maleBadge=fs.readFileSync(new URL('../src/assets/gender/male-badge.png',import.meta.url));
 const node=(shortId,text,x=10,y=10,x2=100,y2=60)=>({shortId,text,x,y,x2,y2,packageName:'com.sybl.voiceroom',enabled:true});
 const profile=()=>[node('root','',0,0,1080,1920),node('tv_nickname','Alice'),node('tv_user_code','12345'),node('tv_age','26',356,94,410,133)];
+test('a delayed visible badge is allowed to render before unknown is returned',async t=>{
+ const nodes=profile().filter(n=>n.shortId!=='tv_age').concat(node('iv_gender','',0,0,63,52));
+ let ready=false,shots=0;const timer=setTimeout(()=>ready=true,300);t.after(()=>clearTimeout(timer));
+ const driver={adb:{screenshotBuffer:async()=>{shots++;return ready?maleBadge:Buffer.from('not-rendered');}},bridge:{dumpUi:async()=>({nodes})}};
+ const result=await readProfileGender(driver,nodes,{expectedUid:'12345',expectedNickname:'Alice'});
+ assert.equal(result.sex,'male');assert.ok(shots<=4);
+});
+test('stopping during badge settling does not capture or classify',async()=>{
+ const nodes=profile().filter(n=>n.shortId!=='tv_age').concat(node('iv_gender','',0,0,63,52));
+ const controller=new AbortController();let shots=0;
+ const timer=setTimeout(()=>controller.abort(),30);
+ try{await assert.rejects(readProfileGender({adb:{screenshotBuffer:async()=>{shots++;return maleBadge;}},bridge:{dumpUi:async()=>({nodes})}},nodes,{expectedUid:'12345',expectedNickname:'Alice',signal:controller.signal}),{name:'AbortError'});assert.equal(shots,0);}
+ finally{clearTimeout(timer);}
+});
 test('explicit gender symbols and descriptions are used only on badge controls',()=>{
  assert.equal(genderFromBadgeNodes([node('tv_age','♀26')]),'female');assert.equal(genderFromBadgeNodes([{...node('iv_gender',''),contentDesc:'♂ 20'}]),'male');
  assert.equal(genderFromBadgeNodes([node('tv_nickname','女神26')]),'unknown');assert.equal(genderFromBadgeNodes([node('iv_gender_female','')]),'female');

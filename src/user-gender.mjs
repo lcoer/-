@@ -1,5 +1,5 @@
 import {classifyGenderBadge} from './gender-badge.cjs';
-import {throwIfAborted,isAbortError} from './async-control.mjs';
+import {throwIfAborted,isAbortError,abortableSleep} from './async-control.mjs';
 const id=node=>node.shortId||String(node.resourceId||'').split('/').pop();
 const rect=n=>n&&[n.x,n.y,n.x2,n.y2].every(Number.isFinite)&&n.x>=0&&n.y>=0&&n.x2>n.x&&n.y2>n.y?{x:n.x,y:n.y,x2:n.x2,y2:n.y2}:null;
 const uid=text=>{const value=String(text||'').trim();return /^(?:\d{1,32}|\(\d{1,32}\)|ID\s*[:：]\s*\d{1,32})$/i.test(value)?value.replace(/^ID\s*[:：]\s*/i,'').replace(/[()]/g,''):null;};
@@ -31,7 +31,8 @@ function context(nodes,expectedUid,expectedNickname){
 export async function readProfileGender(driver,nodes,{expectedUid,expectedNickname,signal,timeout=4000}={}){
  throwIfAborted(signal);const deadline=Date.now()+Math.max(1,timeout);
  try{
-  for(let attempt=0;attempt<2;attempt++){
+  for(let attempt=0;attempt<4&&Date.now()<deadline;attempt++){
+   if(attempt>0)await abortableSleep(Math.min(200,Math.max(0,deadline-Date.now()-1)),signal);
    // The preceding level read can outlive a profile's entrance animation. Refresh
    // identity and the age anchor before choosing pixel coordinates, within the
    // same deadline and capture budget.
@@ -42,23 +43,24 @@ export async function readProfileGender(driver,nodes,{expectedUid,expectedNickna
      const refreshed=await driver.bridge.dumpUi({signal,retries:0,timeout:Math.max(1,deadline-Date.now())});throwIfAborted(signal);
      if(!context(refreshed.nodes,expectedUid,expectedNickname))return {sex:'unknown',reason:'identity_changed'};
      nodes=refreshed.nodes;
-    }catch(error){if(isAbortError(error)||signal?.aborted){throwIfAborted(signal);throw error;}if(attempt===0&&Date.now()<deadline)continue;return {sex:'unknown',reason:'capture_failed'};}
+    }catch(error){if(isAbortError(error)||signal?.aborted){throwIfAborted(signal);throw error;}if(attempt<3&&Date.now()<deadline)continue;return {sex:'unknown',reason:'capture_failed'};}
    }
    throwIfAborted(signal);const current=context(nodes,expectedUid,expectedNickname);if(!current)return {sex:'unknown',reason:'identity_unverified'};
    const direct=semantic(nodes.filter(current.visible));
    if(direct.conflict)return {sex:'unknown',reason:'conflicting_symbols'};
    if(direct.sex!=='unknown')return {sex:direct.sex,evidence:{kind:'gender_badge_text',sex:direct.sex,confidence:1}};
    if(current.icons.length>1||current.ages.length>1)return {sex:'unknown',reason:'badge_unavailable'};
-   if(!current.icons.length&&!current.ages.length){if(attempt===0&&typeof driver.bridge?.dumpUi==='function'&&Date.now()<deadline)continue;return {sex:'unknown',reason:'badge_unavailable'};}
+   if(!current.icons.length&&!current.ages.length){if(attempt<3&&typeof driver.bridge?.dumpUi==='function'&&Date.now()<deadline)continue;return {sex:'unknown',reason:'badge_unavailable'};}
    if(typeof driver.adb?.screenshotBuffer!=='function'||Date.now()>=deadline)return {sex:'unknown',reason:'capture_unavailable'};
    const marker=current.icons[0]||current.ages[0],explicit=!!current.icons.length,height=marker.y2-marker.y;
    const left=Math.max(0,Math.floor(marker.x-2.2*height)),top=Math.max(0,Math.floor(marker.y-0.4*height));
    const roi=explicit?{x:marker.x,y:marker.y,width:marker.x2-marker.x,height}:{x:left,y:top,width:marker.x2-left,height:Math.min(Math.ceil(1.8*height),nodes[0].y2-top)};
    let png,fresh;
    try{
+    if(attempt===0)await abortableSleep(Math.min(200,Math.max(0,deadline-Date.now()-1)),signal);
     png=await driver.adb.screenshotBuffer({signal,timeout:Math.max(1,deadline-Date.now())});throwIfAborted(signal);
     fresh=await driver.bridge.dumpUi({signal,retries:0,timeout:Math.max(1,deadline-Date.now())});throwIfAborted(signal);
-   }catch(error){if(isAbortError(error)||signal?.aborted){throwIfAborted(signal);throw error;}if(attempt===0&&Date.now()<deadline)continue;return {sex:'unknown',reason:'capture_failed'};}
+   }catch(error){if(isAbortError(error)||signal?.aborted){throwIfAborted(signal);throw error;}if(attempt<3&&Date.now()<deadline)continue;return {sex:'unknown',reason:'capture_failed'};}
    const after=context(fresh.nodes,expectedUid,expectedNickname);
    if(!after)return {sex:'unknown',reason:'identity_changed'};
    const markers=explicit?after.icons:after.ages;
