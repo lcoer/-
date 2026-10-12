@@ -27,7 +27,7 @@ function harness(api) {
   };
   const notices = [];
   const context = vm.createContext({
-    window: { api },
+    window: { api: {config:{get:async()=>undefined},...api} },
     document: { getElementById: get, createElement: element, querySelector: () => element() },
     $$: selector => radios[selector] || [],
     toast: text => notices.push(text), escapeHtml: text => text, debounce: fn => fn,

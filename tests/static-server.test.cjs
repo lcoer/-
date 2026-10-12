@@ -10,6 +10,16 @@ test('serves shared frontend policies and refuses traversal / malformed URL',asy
   assert.equal((await request(port,'/engine/adb-client.mjs')).status,404);
   assert.equal((await request(port,'/%ZZ')).status,400);
   assert.equal((await request(port,'/..%2fpackage.json')).status,403);
+  const fontCss=await request(port,'/fonts/fonts.css');
+  assert.equal(fontCss.status,200);
+  const urls=[...fontCss.body.matchAll(/url\(\.\/([^)]+)\)/g)].map(match=>match[1]);
+  assert.ok(urls.length>0);
+  assert.doesNotMatch(fontCss.body,/url\(https?:/);
+  for(const file of new Set(urls)){
+    const font=await request(port,'/fonts/'+file);
+    assert.equal(font.status,200);assert.equal(font.type,'font/woff2');
+  }
+  assert.doesNotMatch((await request(port,'/index.html')).body,/<link[^>]*https:\/\/fonts\./);
 });
 test('occupied port creates owned service on a new port',async t=>{
   const first=await startStaticServer({port:0});t.after(()=>new Promise(r=>first.server.close(r)));

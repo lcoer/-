@@ -6,6 +6,9 @@
   margin-bottom: 16px;
 }
 .task-control-info { flex: 1; }
+.task-level-controls { display:flex; flex-wrap:wrap; gap:16px; align-items:center; }
+.task-level-controls label { display:flex; gap:6px; align-items:center; }
+.task-level-controls .field-hint { flex-basis:100%; margin:0; }
 .task-card-title { display: flex; align-items: center; gap: 10px; }
 .task-card-title .material-symbols-outlined { font-size: 21px; color: var(--primary-c); }
 .task-card-title h3 { font-size: 15.5px; font-weight: 600; color: var(--on-bg); }

@@ -67,3 +67,21 @@ test('pre-cancelled collection does not report running or perform navigation',as
   await assert.rejects(collector.start({signal:AbortSignal.abort()}),{name:'AbortError'});
   assert.equal(collector.getStatus().running,false);
 });
+
+test('public-card hint enrichment bypasses raw-hint cache and publishes new identity metadata once',async()=>{
+ const updates=[];
+ const collector=new RoomCollector({setSignal(){}},{onUsers:users=>{updates.push(users);return {added:0};}});
+ collector.stopped=false;
+ const meta={room:'room',roomCode:'1001'},hint={uid:'hint-test',uidReal:false,nickname:'fixture',sex:'male'};
+ collector.resolvedHintCache.set(hint.uid,{sex:'male'});
+ await collector._publish([hint],meta);
+ assert.equal(updates.length,0);
+ const card={...hint,seenFrom:'roomProfile'};
+ await collector._publish([card],meta);
+ const enriched={...card,publicIdentityType:'nice_number',publicIdentityValue:'11111'};
+ await collector._publish([enriched],meta);
+ await collector._publish([enriched],meta);
+ assert.equal(updates.length,2);
+ assert.equal(updates[1][0].publicIdentityValue,'11111');
+ assert.ok(updates.flat().every(user=>user.uidReal===false));
+});

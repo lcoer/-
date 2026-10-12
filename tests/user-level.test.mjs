@@ -67,3 +67,45 @@ test('actual zero-level numeral remains distinct from its diamond and heart icon
  for(let y=0;y<image.height;y++)for(let x=60;x<image.width;x++)if(x<130||x>198){const p=(y*image.width+x)*4;image.data[p]=image.data[p+1]=image.data[p+2]=0;}
  assert.deepEqual(readLevelDigits(image,roi).values,{});
 });
+
+const effectsNodes=()=>[
+ n('','',{packageName:'com.sybl.voiceroom',x:0,y:759,x2:1080,y2:1920}),
+ n('rv_top_bg','',{x:0,y:759,x2:1080,y2:1698}),
+ n('tv_nickname','FX',{x:691,y:1363,x2:743,y2:1418}),
+ n('tv_nice_num','12345',{x:79,y:1275,x2:144,y2:1302}),
+ n('iv_copy','',{x:181,y:1275,x2:210,y2:1302}),
+ n('tv_online_status','在线',{x:386,y:1612,x2:444,y2:1654}),
+ n('tv_age','20',{x:691,y:1614,x2:723,y2:1653}),
+ ...['关注','送礼','私聊Ta'].map((text,i)=>n('tv_user_operate_item',text,{x:200+i*240,y:1756,x2:330+i*240,y2:1815}))
+];
+test('effects nice-number card reads charm195 while cat decoration supplies no wealth value',async()=>{
+ const current=effectsNodes(),png=fs.readFileSync(new URL('./fixtures/levels/effects-cat-195-frame.png',import.meta.url));
+ const driver={adb:{screenshotBuffer:async()=>png},bridge:{dumpUi:async()=>({nodes:current})}};
+ const options={expectedNiceNumber:'12345',expectedNickname:'FX',ocr:async()=>[{text:'95',x:992,y:90,width:91,height:68}]};
+ assert.deepEqual(profileLevelRegion(current,undefined,'FX',{expectedNiceNumber:'12345'}),{x:292,y:1514,width:496,height:84});
+ const result=await readProfileLevels(driver,current,options);assert.equal(result.charmLevel,195);assert.equal(result.wealthLevel,undefined);
+ assert.equal((await readProfileLevels(driver,current,{...options,expectedUid:'12345'})).reason,'identity_unverified');
+ assert.equal((await readProfileLevels(driver,current,{...options,expectedNiceNumber:'99999'})).reason,'identity_unverified');
+});
+test('effects same-card geometry may settle once but changed nice number cannot retain level',async()=>{
+ const png=fs.readFileSync(new URL('./fixtures/levels/effects-cat-195-frame.png',import.meta.url)),current=effectsNodes();
+ const shifted=current.map(n=>['tv_online_status','tv_age'].includes(n.shortId)?{...n,y:n.y+10,y2:n.y2+10}:n);
+ let snapshots=0,captures=0;
+ const driver={adb:{screenshotBuffer:async()=>{captures++;return png;}},bridge:{dumpUi:async()=>({nodes:++snapshots===1?shifted:current})}};
+ // Two changes remain unstable: never classify the animation's mismatched pixels.
+ const result=await readProfileLevels(driver,current,{expectedNiceNumber:'12345',expectedNickname:'FX',ocr:async()=>[]});
+ assert.equal(captures,2);assert.equal(result.reason,'layout_unstable');assert.equal(result.charmLevel,undefined);
+ driver.bridge.dumpUi=async()=>({nodes:current.map(n=>n.shortId==='tv_nice_num'?{...n,text:'99999'}:n)});
+ const changed=await readProfileLevels(driver,current,{expectedNiceNumber:'12345',expectedNickname:'FX'});
+ assert.equal(changed.reason,'identity_or_layout_changed');assert.equal(changed.charmLevel,undefined);
+});
+
+
+
+test('effects same-identity layout settles on second screenshot within capture budget',async()=>{
+ const png=fs.readFileSync(new URL('./fixtures/levels/effects-cat-195-frame.png',import.meta.url)),current=effectsNodes();
+ const moved=current.map(n=>['tv_online_status','tv_age'].includes(n.shortId)?{...n,y:n.y+10,y2:n.y2+10}:n);
+ let captures=0;const driver={adb:{screenshotBuffer:async()=>{captures++;return png;}},bridge:{dumpUi:async()=>({nodes:moved})}};
+ const result=await readProfileLevels(driver,current,{expectedNiceNumber:'12345',expectedNickname:'FX',ocr:async()=>[]});
+ assert.equal(captures,2);assert.equal(result.charmLevel,195);assert.equal(result.wealthLevel,undefined);
+});

@@ -3,7 +3,7 @@ function setup(){
  const elements=new Map(),callbacks=[];
  const get=id=>{assert.doesNotMatch(id,/^task(?:Welcome|Call)/,'removed task DOM must not be accessed');if(!elements.has(id))elements.set(id,{textContent:'',disabled:false,classList:{toggle(){}},addEventListener(){},querySelector(){return null;}});return elements.get(id);};
  const stopped={state:'stopped',running:false,stats:{}};
- const context=vm.createContext({window:{api:{task:{onLog(){},onStatus:fn=>callbacks.push(fn),getStatus:async()=>({statusRevision:0,private:stopped,deviceOwner:null})}}},document:{getElementById:get}});
+ const context=vm.createContext({window:{api:{config:{get:async()=>undefined},task:{onLog(){},onStatus:fn=>callbacks.push(fn),getStatus:async()=>({statusRevision:0,private:stopped,deviceOwner:null})}}},document:{getElementById:get,querySelector:()=>null}});
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../design/js/task-console.js'),'utf8')+'\nthis.TaskConsole=TaskConsole',context);
  return {get,callbacks,init:()=>context.TaskConsole.init(),stopped};
 }

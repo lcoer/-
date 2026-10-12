@@ -4,8 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>双鱼部落写作业机器人</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
+<link href="fonts/fonts.css" rel="stylesheet">
 <link rel="stylesheet" href="titlebar.css">
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/layout.css">
@@ -110,14 +109,14 @@
       <section class="view ranking-view active">
         <section class="stats-row">
           <div class="stat-card">
-            <div class="stat-label"><span class="dot" style="background:var(--color-female)"></span>女神池(ID数)</div>
+            <div class="stat-label"><span class="dot" style="background:var(--color-female)"></span>女神资料数</div>
             <div class="stat-value" id="statFemalePool">-</div>
-            <div class="stat-delta">今日采集女神</div>
+            <div class="stat-delta">包含待核验资料</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label"><span class="dot" style="background:var(--color-male)"></span>男神池(ID数)</div>
+            <div class="stat-label"><span class="dot" style="background:var(--color-male)"></span>男神资料数</div>
             <div class="stat-value" id="statMalePool">-</div>
-            <div class="stat-delta">今日采集男神</div>
+            <div class="stat-delta">包含待核验资料</div>
           </div>
           <div class="stat-card">
             <div class="stat-label"><span class="dot" style="background:var(--gold)"></span>所选日期记录</div>
@@ -138,7 +137,7 @@
             <button class="guest-seg-btn seg-male" data-seg="male">男神</button>
           </div>
           <select id="guestDateSel" class="guest-date-sel" title="切换数据日期"></select>
-          <input type="text" id="guestKw" class="guest-kw" placeholder="搜索 昵称 / ID / 房间" />
+          <input type="text" id="guestKw" class="guest-kw" placeholder="搜索 昵称 / UID / 靓号 / 房间" />
           <span class="grow" style="flex:1"></span>
           <button class="guest-clear-btn" id="guestClearBtn" title="清除所有通过演示/模拟生成的虚拟用户,仅保留真实采集的数据">
             <span class="material-symbols-outlined">delete_sweep</span>
@@ -167,9 +166,9 @@
           <span>资料卡检查 <strong id="collectProfiles">0</strong></span>
           <span>重复观察 <strong id="collectDuplicates">0</strong></span>
           <span>所选日期真实 UID <strong id="collectStoredVerified">0</strong></span>
-          <span>仅昵称记录 <strong id="collectStoredHints">0</strong></span>
+          <span>待核验资料 <strong id="collectStoredHints">0</strong></span>
         </div>
-        <p class="field-hint" id="collectCoverageHint">多房间模式会自动切换房间；成员名单不可用时读取公屏与麦位。仅昵称记录不会算作真实 UID。</p>
+        <p class="field-hint" id="collectCoverageHint">多房间模式会自动切换房间；成员名单不可用时读取公屏与麦位。待核验资料可含靓号和等级，未确认 UID 的记录不会计入真实 UID 数量。</p>
 
         <div class="guest-grid" id="guestGrid"></div>
 
@@ -255,7 +254,7 @@
               <div class="cloud-id-preview custom-scroll" id="cloudIdPreview">加载中...</div>
               <div class="field-hint">
                 <span class="material-symbols-outlined">info</span>
-                全部性别包含未知；公会未知不会归为无公会。仅昵称和演示记录不能进入真实发送目标。
+                全部性别包含未知；公会未知不会归为无公会。待核验资料和演示记录不能进入真实发送目标。
               </div>
             </div>
 
@@ -344,6 +343,15 @@
                 <span class="material-symbols-outlined">stop</span>停止私聊
               </button>
             </div>
+          </div>
+        </div>
+
+        <div class="task-control-bar">
+          <div class="task-control-info task-level-controls">
+            <label><input type="checkbox" id="privateLevelEnabled"> 按等级筛选</label>
+            <label><input type="checkbox" id="privateLevelHigh" checked disabled> 高等级用户</label>
+            <label><input type="checkbox" id="privateLevelLow" disabled> 低等级用户</label>
+            <p class="field-hint" id="privateLevelHint">关闭时沿用原规则；开启后在原规则名单内筛选，未识别等级排除。</p>
           </div>
         </div>
 
@@ -539,19 +547,9 @@
         <div class="card">
           <div class="recommendation-toolbar">
             <label>查看分组<select id="recommendGroupFilter"><option value="all">全部用户</option><option value="high">高等级</option><option value="low">低等级</option><option value="unclassified">等级未识别</option></select></label>
-            <button class="save-btn ghost" id="recommendSelectAllBtn">全选当前分组</button>
-            <button class="save-btn ghost" id="recommendClearBtn">清空选择</button>
-            <span id="recommendSelectedCount">已选 0 人</span>
           </div>
-          <div class="recommendation-table-wrap custom-scroll"><table class="recommendation-table"><thead><tr><th>选择</th><th>用户 / UID</th><th>性别</th><th>财富等级</th><th>魅力等级</th><th>分组</th></tr></thead><tbody id="recommendRows"></tbody></table></div>
+          <div class="recommendation-table-wrap custom-scroll"><table class="recommendation-table"><thead><tr><th>用户 / UID</th><th>性别</th><th>财富等级</th><th>魅力等级</th><th>分组</th></tr></thead><tbody id="recommendRows"></tbody></table></div>
           <p class="field-hint" id="recommendEmpty">暂无用户，请先采集并设置阈值。</p>
-        </div>
-        <div class="card recommendation-assignment">
-          <h3>指定作者 / 负责人</h3>
-          <p class="field-hint">填写推荐内容，将职责分配给已选用户。此操作仅保存本地分配记录，不会自动发送私信。</p>
-          <label for="recommendContent">推荐内容</label><textarea id="recommendContent" rows="4" placeholder="请输入由所选用户撰写或负责的内容"></textarea>
-          <div class="recommendation-toolbar"><span id="recommendContentCount">0 / 2000 字</span><button class="save-btn" id="recommendAssignBtn" disabled>指定给已选作者</button></div>
-          <h3>已保存分配</h3><div id="recommendAssignments"></div>
         </div>
       </section>
     </main>

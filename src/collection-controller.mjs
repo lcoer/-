@@ -157,14 +157,14 @@ export class CollectionController {
     const now = this.clock(), fresh = [];
     let duplicates = 0;
     for (const user of users) {
-      if (!user.uidReal && this.resolvedHintCache.has(user.uid)) {
+      if (!user.uidReal && user.seenFrom!=='roomProfile' && this.resolvedHintCache.has(user.uid)) {
         duplicates++;
         continue;
       }
       if (user.uidReal)
         this.sessionVerified.add(user.uid);
       const record = { ...user, room: meta.room, roomCode: meta.roomCode || null, lastSeenAt: now, ts: now };
-      const signature = JSON.stringify([record.nickname, record.sex, record.wealthLevel, record.charmLevel, record.guild, record.guildKnown, record.rongCloudId, record.room, record.roomCode]);
+      const signature = JSON.stringify([record.nickname, record.sex, record.wealthLevel, record.charmLevel, record.guild, record.guildKnown, record.rongCloudId, record.room, record.roomCode, record.publicIdentityType, record.publicIdentityValue]);
       const prior = this.published.get(record.uid);
       if (prior && prior.signature === signature && now - prior.at < (this.opts.observationRefreshMs || 30000)) {
         duplicates++;

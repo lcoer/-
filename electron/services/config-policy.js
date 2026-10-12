@@ -1,11 +1,12 @@
 function validateConfigChange(key, value) {
   const error = reason => ({ ok: false, reason });
-  if (!['rules', 'copywriting', 'blacklist', 'settings', 'collection'].includes(key))
+  if (!['rules', 'copywriting', 'blacklist', 'settings', 'collection','privateLevelFilter'].includes(key))
     return error('INVALID_CONFIG_KEY');
   if (key === 'blacklist')
     return Array.isArray(value) && value.every(v => typeof v === 'string' && /^\d{1,32}$/.test(v)) ? { ok: true } : error('INVALID_BLACKLIST');
   if (!value || typeof value !== 'object' || Array.isArray(value))
     return error('INVALID_CONFIG');
+  if(key==='privateLevelFilter'&&(typeof value.enabled!=='boolean'||!Array.isArray(value.groups)||value.groups.length>2||new Set(value.groups).size!==value.groups.length||value.groups.some(group=>!['high','low'].includes(group))))return error('INVALID_PRIVATE_LEVEL_FILTER');
   if (key === 'settings' && !['android', 'demo'].includes(value.executionMode))
     return error('INVALID_EXECUTION_MODE');
   if (key === 'settings' && value.senderAccountUid != null &&

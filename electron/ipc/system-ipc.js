@@ -12,8 +12,6 @@ function registerSystemIpc(ctx) {
   const register = safeHandle(ipcMain, ctx);
   const handle = (channel, fn) => register(channel, (_e, ...args) => fn(...args));
   handle('recommendation:list', options => dataStore.getRecommendations(options));
-  handle('recommendation:assign', request => dataStore.assignRecommendations(request));
-  handle('recommendation:assignments', () => dataStore.getAssignments());
   const connect = () => taskRunner.withDeviceOperation('connect', async (signal) => {
     clientManager.reset();
     const info = await clientManager.ensureClient({ signal, onLog: (l, m) => dataStore.pushSystemLog(l, m) });

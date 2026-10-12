@@ -8,13 +8,6 @@
 .recommendation-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
 .recommendation-table th { position: sticky; top: 0; background: var(--surface); color: var(--tertiary-c); }
 .recommendation-table th, .recommendation-table td { padding: 12px 10px; border-bottom: 1px solid var(--outline-soft); }
-.recommendation-table tbody tr { cursor: pointer; }
-.recommendation-table tbody tr:hover, .recommendation-table tbody tr.selected { background: var(--primary-dim); }
-.recommendation-table input { accent-color: var(--primary); width: 17px; height: 17px; cursor: pointer; }
 .recommendation-table small { display: block; color: var(--muted); margin-top: 5px; }
-.recommendation-assignment textarea { margin-top: 8px; }
-.recommendation-history-item { padding: 14px 0; border-bottom: 1px solid var(--outline-soft); }
-.recommendation-history-item p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; }
-.recommendation-history-item small { color: var(--muted); }
 .recommendation-view .field-hint { line-height: 1.7; }
 .recommendation-view #recommendEmpty[hidden] { display: none; }

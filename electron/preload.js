@@ -6,8 +6,6 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   recommendation: {
     list: options => ipcRenderer.invoke('recommendation:list', options),
-    assign: request => ipcRenderer.invoke('recommendation:assign', request),
-    assignments: () => ipcRenderer.invoke('recommendation:assignments'),
   },
   // ===== 应用/系统信息 + 模拟器连接(真实模式) =====
   system: {
@@ -64,6 +62,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // ===== 任务控制(私聊) =====
   task: {
+    previewLevelTargets: request => ipcRenderer.invoke('task:previewLevelTargets', request),
     // 启动任务 name:'private'
     start: (name, config) => ipcRenderer.invoke('task:start', name, config),
     stop: (name) => ipcRenderer.invoke('task:stop', name),

@@ -1,5 +1,7 @@
 import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
 import { isOperationRoomCard } from './room-card.mjs';
+import {profileIdentity} from './profile-identity.mjs';
+import {placeholderUid} from './observation-identity.mjs';
 const id = n => n.shortId || String(n.resourceId || '').split('/').pop();
 const APP = 'com.sybl.voiceroom';
 const app = nodes => nodes[0]?.packageName === APP && !!bounds(nodes[0]) && !nodes.some(n => n.packageName && n.packageName !== APP);
@@ -107,6 +109,23 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
             throwIfAborted(signal);
             resolved.push(record);
             await onUser(record);
+            break;
+          }
+          const nice=nodes.filter(n=>id(n)==='tv_nice_num'&&visible(n,nodes));
+          const niceNumber=nice.length===1?text(nice[0]):null;
+          if(!uid&&nickname===user.nickname&&profileIdentity(nodes,{expectedNiceNumber:niceNumber,expectedNickname:nickname})) {
+            const options={expectedNiceNumber:niceNumber,expectedNickname:nickname,signal};
+            const gender=typeof driver.readProfileGender==='function'?await driver.readProfileGender(nodes,{...options,timeout:Math.min(4000,remaining())}):{sex:'unknown'};
+            throwIfAborted(signal);
+            const levels=typeof driver.readProfileLevels==='function'?await driver.readProfileLevels(nodes,{...options,timeout:Math.min(4500,remaining())}):{};
+            const latest=await read();
+            throwIfAborted(signal);
+            if(!profileIdentity(latest,options)){reason='identity_mismatch';break;}
+            const record={...user,uid:placeholderUid(nickname,{room:room||user.room,roomCode:roomCode||user.roomCode}),uidReal:false,nickname,room:room||user.room||'',roomCode:roomCode||user.roomCode||'',seenFrom:'roomProfile',evidence:'matched_public_card_hint',resolvedFrom:user.uid,publicIdentityType:'nice_number',publicIdentityValue:niceNumber,lastSeenAt:new Date().toISOString()};
+            if(['male','female'].includes(gender.sex)){record.sex=gender.sex;if(gender.evidence)record.sexEvidence=gender.evidence;}
+            for(const field of ['wealthLevel','charmLevel'])if(levels[field]==='?'||(Number.isInteger(levels[field])&&levels[field]>=0))record[field]=levels[field];
+            resolved.push(record);await onUser(record);
+            onLog('info',`公开资料卡已保存，靓号 ${niceNumber}，真实 UID 待核验，不用于私信或作者分配。`);
             break;
           }
           if ((nickname && nickname !== user.nickname) || names.length > 1 || codes.length > 1) {

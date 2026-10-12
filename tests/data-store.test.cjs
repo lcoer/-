@@ -297,6 +297,28 @@ test('torn append and checksum corruption block sends and never discard intent',
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
 function cardProof(overrides={}) { return {uid:'12345',uidReal:true,nickname:'Alice',roomCode:'9277',source:'room_observation',seenFrom:'roomProfile',evidence:'matched_room_user_card',resolvedFrom:hintUid('Alice','9277'),...overrides}; }
+test('vanity-number hint retains profile attributes without becoming a verified sending target',async()=>{
+ const dir=fs.mkdtempSync(path.join(__dirname,'syl-store-'));let s;
+ try {
+  s=store({dataDir:dir,persist:true});const uid=hintUid('Alice','9277');
+  const hint={uid,uidReal:false,nickname:'Alice',room:'Room',roomCode:'9277',seenFrom:'roomProfile',sex:'female',wealthLevel:53,charmLevel:'?',publicIdentityType:'nice_number',publicIdentityValue:'22217'};
+  s.ingestRealRecords([hint]);s.ingestRealRecords([{...hint,seenFrom:'wheat',sex:'unknown',wealthLevel:null,charmLevel:undefined,publicIdentityType:undefined,publicIdentityValue:undefined}]);
+  const rec=s.getRecords().records[0];assert.equal(rec.uid,uid);assert.equal(rec.uidReal,false);assert.equal(rec.sex,'female');assert.equal(rec.wealthLevel,53);assert.equal(rec.charmLevel,'?');assert.equal(rec.publicIdentityValue,'22217');
+  assert.equal(s.getStats().verifiedCount,0);assert.equal(s.getStats().placeholderCount,1);assert.deepEqual(s.getTargetsByHour('2026-10-09','auto','all','all'),[]);assert.equal(s.getRecommendations().counts.total,0);
+  const {normalizeTargets}=await import('../src/target-policy.mjs');
+  const targets=normalizeTargets([{uid:'22217',uidReal:false,source:'room',nickname:'Alice'}]);assert.equal(targets.targets.length,0);assert.equal(targets.rejected[0].reason,'UID_NOT_VERIFIED');
+  assert.equal(s.getRecords(null,null,1,50,'22217').total,1);
+  s.shutdown();s=store({dataDir:dir,persist:true});assert.equal(s.getRecords().records[0].publicIdentityValue,'22217');assert.equal(s.getRecords().records[0].sex,'female');
+ }finally{s?.shutdown();fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('public identity whitelist rejects malformed aliases and separate hint scopes cannot share attributes',()=>{
+ for(const pair of [{publicIdentityType:'uid',publicIdentityValue:'22217'},{publicIdentityType:'nice_number',publicIdentityValue:'<script>'},{publicIdentityType:'nice_number',publicIdentityValue:22217},{publicIdentityType:'nice_number',publicIdentityValue:'1'.repeat(33)}]){
+  const s=store();s.ingestRealRecords([{uid:'nhint',uidReal:false,nickname:'fixture',...pair}]);assert.equal(s.getRecords().records[0].publicIdentityValue,undefined);assert.equal(s.getRecords().records[0].uid,'nhint');
+ }
+ const s=store(),base={uid:'nhint',uidReal:false,nickname:'Alice',roomCode:'one',sex:'female',wealthLevel:99};
+ s.ingestRealRecords([base,{...base,roomCode:'two',sex:'unknown',wealthLevel:null},{...base,nickname:'Bob',sex:'unknown',wealthLevel:null}]);
+ assert.equal(s.getRecords().total,3);assert.equal(s.getRecords().records.find(r=>r.roomCode==='two').sex,'unknown');assert.equal(s.getRecords().records.find(r=>r.nickname==='Bob').wealthLevel,undefined);
+});
 test('exact room-card evidence resolves only its scoped hint and preserves proven fields',()=>{
  const s=store();s.ingestRealRecords([{uid:hintUid('Alice','9277'),uidReal:false,nickname:'Alice',roomCode:'9277',sex:'female',guild:'hintGuild'}]);
  const result=s.ingestRealRecords([cardProof({guild:'cardGuild'})]);assert.equal(result.resolvedHints,1);assert.equal(result.addedVerified,1);assert.equal(result.addedUnverified,0);assert.equal(result.total,1);

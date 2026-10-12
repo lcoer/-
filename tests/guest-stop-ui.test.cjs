@@ -35,6 +35,13 @@ test('late start acknowledgement cannot overwrite a stopped status', async () =>
   assert.equal(h.element('guestCollectBtnText').textContent, '开始实时采集');
   assert.equal(h.element('guestCollectBtn').disabled, false);
 });
+test('guest cards display public vanity alias separately from pending UID and show genuine levels',async()=>{
+ const h=setup({portal:{getRecords:async()=>({ok:true,records:[{uid:'nhint',uidReal:false,nickname:'fixture',publicIdentityType:'nice_number',publicIdentityValue:'22217',sex:'female',wealthLevel:53,charmLevel:'?',source:'room'}],total:1})}});
+ h.view.onStream({type:'batch',payload:{added:1}});await tick();
+ const html=h.element('guestGrid').innerHTML;assert.match(html,/待核验/);assert.match(html,/靓号/);assert.match(html,/22217/);assert.match(html,/财富等级/);assert.match(html,/>53</);assert.match(html,/\?\?\?（隐藏）/);assert.doesNotMatch(html,/>nhint</);
+ const bad=setup({portal:{getRecords:async()=>({ok:true,records:[{uid:'12345',nickname:'fixture',publicIdentityType:'nice_number',publicIdentityValue:'<script>',wealthLevel:null,charmLevel:'unknown'}],total:1})}});
+ bad.view.onStream({type:'batch',payload:{added:1}});await tick();assert.doesNotMatch(bad.element('guestGrid').innerHTML,/<script>/);assert.match(bad.element('guestGrid').innerHTML,/未识别/);
+});
 
 test('stop remains disabled when an earlier start response arrives during cancellation', async () => {
   const start = deferred(), stop = deferred();

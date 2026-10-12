@@ -21,9 +21,11 @@ const GuestView = (function () {
     const sexLabel = r.sex === 'female' ? '女神' : (r.sex === 'male' ? '男神' : '未知');
     const realTag = r.source === 'room'
       ? `<span class="guest-tag real" title="页面可见用户线索，不代表完整在线名单">最近观察</span>` : '';
-    // uidReal=false 表示还没拿到真实用户ID(只有昵称)
-    const uidText = r.uidReal === false ? '未获取(仅昵称)' : escapeHtml(r.uid);
+    // A public vanity number is a traceable alias, not a verified UID.
+    const uidText = r.uidReal === false ? '待核验' : escapeHtml(r.uid);
     const uidCls = r.uidReal === false ? 'guest-row-value muted' : 'guest-row-value';
+    const publicIdentity=r.publicIdentityType==='nice_number'&&typeof r.publicIdentityValue==='string'&&/^\d{1,32}$/.test(r.publicIdentityValue)?r.publicIdentityValue:null;
+    const levelText=field=>{const value=r[field];return value==='?'||/^[?？]+$/.test(String(value??''))?'???（隐藏）':Number.isSafeInteger(value)&&value>=0?String(value):'未识别';};
     return `
       <div class="guest-card">
         <div class="guest-card-head">
@@ -35,6 +37,9 @@ const GuestView = (function () {
         </div>
         <div class="guest-card-rows">
           <div class="guest-row"><span class="guest-row-label">UID</span><span class="${uidCls}">${uidText}</span></div>
+          ${publicIdentity?`<div class="guest-row"><span class="guest-row-label">靓号</span><span class="guest-row-value">${escapeHtml(publicIdentity)}</span></div>`:''}
+          <div class="guest-row"><span class="guest-row-label">财富等级</span><span class="guest-row-value">${levelText('wealthLevel')}</span></div>
+          <div class="guest-row"><span class="guest-row-label">魅力等级</span><span class="guest-row-value">${levelText('charmLevel')}</span></div>
           <div class="guest-row"><span class="guest-row-label">融云ID</span><span class="guest-row-value">${escapeHtml(r.rongCloudId || '—')}</span></div>
         </div>
         <div class="guest-tags">
@@ -51,6 +56,7 @@ const GuestView = (function () {
     return list.filter(r =>
       (r.nickname || '').toLowerCase().includes(kw) ||
       String(r.uid).includes(kw) ||
+      (r.publicIdentityType==='nice_number'&&String(r.publicIdentityValue||'').includes(kw)) ||
       (r.room || '').toLowerCase().includes(kw));
   }
 
@@ -191,7 +197,7 @@ const GuestView = (function () {
     document.getElementById('collectPages').textContent = fmtNum(st.pagesScanned);
     document.getElementById('collectProfiles').textContent = fmtNum(st.profilesRead);
     document.getElementById('collectDuplicates').textContent = fmtNum(st.duplicateSightings);
-    const coverage = { empty: '成员名单显示暂无数据，已降级为公屏与麦位；多房间模式会继续下一房间。', unavailable: '未找到可用成员列表，读取公屏与麦位线索。', partial: '成员列表只完成部分扫描，保留已读数据并继续遍历。', complete: '本房间成员列表已扫描；真实 UID 与仅昵称记录分别统计。' };
+    const coverage = { empty: '成员名单显示暂无数据，已降级为公屏与麦位；多房间模式会继续下一房间。', unavailable: '未找到可用成员列表，读取公屏与麦位线索。', partial: '成员列表只完成部分扫描，保留已读数据并继续遍历。', complete: '本房间成员列表已扫描；真实 UID 与待核验资料分别统计。' };
     if (st.memberStatus) document.getElementById('collectCoverageHint').textContent = coverage[st.memberStatus] || '正在扫描公开可见用户；本次新 UID 已排除历史已采集 ID。';
     if (st.waitingForNextCycle) document.getElementById('collectCoverageHint').textContent = st.navigationStatus === 'retry' ? '暂未确认更多可访问房间，正在等待重试。' : '已达到本轮访问范围，正在等待下一轮。';
     if (!state.collecting) document.getElementById('collectCoverageHint').textContent = st.state === 'failed' ? `采集失败：${st.error || '请查看控制台日志'}` : '采集已停止，已采集记录已保留。';

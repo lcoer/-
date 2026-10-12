@@ -34,56 +34,35 @@ test('verified identity excludes malformed flags and ISO latest observation cont
  assert.deepEqual(result.counts,{high:2,low:1,unclassified:0,total:3});
  assert.equal(result.groups.high.find(item=>item.uid==='123').level,54);
 });
-test('store retains observed levels; assignment is atomic, idempotent, isolated and survives restart',()=>{
+
+test('classification settings and observed levels survive restart without assignment APIs',()=>{
  const dir=fs.mkdtempSync(path.join(__dirname,'syl-recommendation-'));let store;
  try {
-  store=createDataStore({dataDir:dir,clock:()=>1000});store.init();
-  assert.equal(store.getRecommendations().threshold,54);
-  assert.equal(store.getRecommendations().levelField,'wealthLevel');
-  store.ingestRealRecords([{uid:'123',nickname:'fixture',wealthLevel:30,charmLevel:'???'},{uid:'456',wealthLevel:0}]);
-  store.ingestRealRecords([{uid:'123',wealthLevel:null,charmLevel:undefined}]);
+  store=createDataStore({dataDir:dir});store.init();assert.equal(store.getRecommendations().threshold,54);
+  store.ingestRealRecords([{uid:'123',wealthLevel:30,charmLevel:'???'},{uid:'456',wealthLevel:0}]);
+  store.ingestRealRecords([{uid:'123',wealthLevel:null}]);
   assert.equal(store.getRecommendations(options).groups.high[0].original.charmLevel,'?');
-  const request={...options,uids:['123','456','123'],content:'负责内容 <>& 😀\n第二行',requestId:'retry-1'};
-  const result=store.assignRecommendations(request);
-  assert.deepEqual(result.assignment.authors.map(author=>author.uid),['123','456']);
-  assert.equal(store.assignRecommendations(request).duplicate,true);
-  assert.equal(store.getAssignments().assignments.length,1);
-  assert.throws(()=>store.assignRecommendations({...request,content:'different'}),/REQUEST_CONFLICT/);
-  assert.throws(()=>store.assignRecommendations({...request,uids:['999'],requestId:'missing'}),/USER_NOT_FOUND/);
-  for(const content of ['', ' ', '😀'.repeat(2001),{}]) assert.throws(()=>store.assignRecommendations({...request,content}),/INVALID_ASSIGNMENT_CONTENT/);
-  assert.throws(()=>store.assignRecommendations({...request,uids:[]}),/INVALID_ASSIGNMENT_UIDS/);
-  assert.equal(store.getPendingResults().length,0);
-  const external=store.getAssignments();external.assignments[0].content='mutated';
-  assert.equal(store.getAssignments().assignments[0].content,request.content);
+  assert.equal(store.assignRecommendations,undefined);assert.equal(store.getAssignments,undefined);
   store.shutdown();store=createDataStore({dataDir:dir});store.init();
-  assert.equal(store.getAssignments().assignments[0].content,request.content);
-  assert.equal(store.getRecommendations().threshold,30);
-  store.clearDemoRecords(true);
-  assert.equal(store.getAssignments().assignments[0].authors[0].uid,'123');
-  assert.throws(()=>store.assignRecommendations({...request,requestId:'missing-after-clear'}),/USER_NOT_FOUND/);
- }finally {store?.shutdown();fs.rmSync(dir,{recursive:true,force:true});}
+  assert.equal(store.getRecommendations().threshold,30);assert.equal(store.getRecommendations().counts.total,2);
+ }finally{store?.shutdown();fs.rmSync(dir,{recursive:true,force:true});}
 });
-test('corrupt recommendation history fails closed rather than silently losing assignments',()=>{
+test('legacy recommendation files keep classification settings while retired fields are ignored',()=>{
  const dir=fs.mkdtempSync(path.join(__dirname,'syl-recommendation-'));let store;
  try {
-  fs.writeFileSync(path.join(dir,'recommendations-v1.json'),'{broken');
+  fs.writeFileSync(path.join(dir,'recommendations-v1.json'),JSON.stringify({schemaVersion:1,settings:options,assignments:[{content:'legacy'}]}));
+  store=createDataStore({dataDir:dir});store.init();assert.equal(store.getRecommendations().threshold,30);
+  store.getRecommendations({...options,threshold:54});
+  const saved=JSON.parse(fs.readFileSync(path.join(dir,'recommendations-v1.json'),'utf8'));assert.equal(saved.settings.threshold,54);assert.equal(saved.assignments,undefined);
+ }finally{store?.shutdown();fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('corrupt classification settings fail closed; failed persistence preserves memory and backup',()=>{
+ const dir=fs.mkdtempSync(path.join(__dirname,'syl-recommendation-'));let store;
+ try {
+  const file=path.join(dir,'recommendations-v1.json');fs.writeFileSync(file,'{broken');
   store=createDataStore({dataDir:dir});assert.throws(()=>store.init(),/DATA_CORRUPT/);
- }finally {store?.shutdown();fs.rmSync(dir,{recursive:true,force:true});}
-});
-test('failed assignment persistence leaves memory unchanged and a validated backup can recover',()=>{
- const dir=fs.mkdtempSync(path.join(__dirname,'syl-recommendation-'));let store;
- try {
-  store=createDataStore({dataDir:dir});store.init();store.ingestRealRecords([{uid:'123',wealthLevel:50}]);
-  const request={...options,uids:['123'],content:'fixture'};
-  store.assignRecommendations(request);
-  const file=path.join(dir,'recommendations-v1.json');
-  store.assignRecommendations({...request,content:'second'});
-  fs.mkdirSync(`${file}.tmp`);
-  assert.throws(()=>store.assignRecommendations({...request,content:'cannot save'}));
-  assert.equal(store.getAssignments().assignments.length,2);
-  fs.rmdirSync(`${file}.tmp`);store.shutdown();
-  fs.writeFileSync(file,'{corrupt');store=createDataStore({dataDir:dir});store.init();
-  assert.ok(store.getAssignments().assignments.length>=1);
-  assert.throws(()=>store.assignRecommendations(null),/INVALID_ASSIGNMENT_REQUEST/);
- }finally {store?.shutdown();fs.rmSync(dir,{recursive:true,force:true});}
+  fs.unlinkSync(file);store.init();store.getRecommendations(options);store.getRecommendations({...options,threshold:54});
+  fs.mkdirSync(file+'.tmp');assert.throws(()=>store.getRecommendations({...options,threshold:55}));assert.equal(store.getRecommendations().threshold,54);fs.rmdirSync(file+'.tmp');store.shutdown();
+  fs.writeFileSync(file,'{broken');store=createDataStore({dataDir:dir});store.init();assert.equal(store.getRecommendations().threshold,54);
+ }finally{store?.shutdown();fs.rmSync(dir,{recursive:true,force:true});}
 });

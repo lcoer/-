@@ -13,8 +13,8 @@ const { createHash } = require('node:crypto');
 const appConfig = require('../config');
 const {openOutcomeJournal} = require('./outcome-journal');
 const {isDefinitiveSendRejection} = require('../../src/send-proof.cjs');
-const {randomUUID} = require('node:crypto');
 const {validateOptions,normalizeLevel,classifyRecommendations} = require('../../src/recommendation-policy.cjs');
+const {previewLevelTargets,assertLevelTargets}=require('../../src/private-level-policy.cjs');
 
 let _app = null;
 try { _app = require('electron').app; } catch { _app = null; }
@@ -73,7 +73,7 @@ function init() {
   STATE.sourceFile = path.join(dir, 'source.json');
   STATE.recordsFile = path.join(dir, 'records-v2.json');
   STATE.recommendationsFile = path.join(dir, 'recommendations-v1.json');
-  STATE.recommendations = {schemaVersion:1,settings:{levelField:'wealthLevel',threshold:54},assignments:[]};
+  STATE.recommendations = {schemaVersion:1,settings:{levelField:'wealthLevel',threshold:54}};
   STATE.outcomesFile = path.join(dir, 'outcomes-v2.json');
   STATE.config = defaultConfig(); STATE.stats = {}; STATE.sentToday = {}; STATE.records = []; STATE.outcomes = []; STATE.legacyStats = {}; STATE.recoveryRequired = false; STATE.collectionRecoveryRequired = false;
   if (persist) {
@@ -103,11 +103,12 @@ function shutdown() { if (STATE.timer) clearInterval(STATE.timer); STATE.timer =
 function saveRecords(records = STATE.records) { saveJson(STATE.recordsFile, { schemaVersion: 2, records: records.filter(r => r.source !== 'demo') }); }
 
 function validCollectionHistory(history) {
-  const textFields = ['nickname','room','guild','roomCode','seenFrom','rongCloudId','avatar','source'];
+  const textFields = ['nickname','room','guild','roomCode','seenFrom','rongCloudId','avatar','source','publicIdentityType','publicIdentityValue'];
   return history?.schemaVersion === 2 && Array.isArray(history.records) && history.records.every(r =>
     r && typeof r === 'object' && !Array.isArray(r) && typeof r.uid === 'string' && !!r.uid &&
     Number.isFinite(epoch(r.ts,NaN)) && (r.uidReal == null || typeof r.uidReal === 'boolean') &&
-    (r.online == null || typeof r.online === 'boolean') && textFields.every(field => r[field] == null || typeof r[field] === 'string'));
+    (r.online == null || typeof r.online === 'boolean') && textFields.every(field => r[field] == null || typeof r[field] === 'string') &&
+    ((r.publicIdentityType==null&&r.publicIdentityValue==null)||(r.publicIdentityType==='nice_number'&&typeof r.publicIdentityValue==='string'&&/^\d{1,32}$/.test(r.publicIdentityValue))));
 }
 function loadCollectionHistory() {
   const files = [STATE.recordsFile, `${STATE.recordsFile}.bak`];
@@ -125,20 +126,16 @@ function loadCollectionHistory() {
 }
 
 function validRecommendations(value) {
-  if (value?.schemaVersion !== 1 || !Array.isArray(value.assignments)) return false;
+  if (value?.schemaVersion !== 1) return false;
   try { if(value.settings?.threshold!==null) validateOptions(value.settings); }
   catch { return false; }
-  return ['wealthLevel','charmLevel'].includes(value.settings?.levelField) && value.assignments.every(item =>
-    item && typeof item.id==='string' && Number.isFinite(item.createdAt) && typeof item.content==='string' &&
-    item.content.trim() && [...item.content].length<=2000 && Array.isArray(item.authors) && item.authors.length &&
-    item.authors.every(author=>author && typeof author.uid==='string' && /^\d{1,32}$/.test(author.uid)) &&
-    ['wealthLevel','charmLevel'].includes(item.levelField) && Number.isSafeInteger(item.threshold) && item.threshold>=0);
+  return ['wealthLevel','charmLevel'].includes(value.settings?.levelField);
 }
 function loadRecommendations() {
   const files=[STATE.recommendationsFile,`${STATE.recommendationsFile}.bak`];
   if(!files.some(file=>fs.existsSync(file))) return;
   for(const file of files) {
-    try { const value=JSON.parse(fs.readFileSync(file,'utf8'));if(validRecommendations(value)){STATE.recommendations=value;return;} }
+    try { const value=JSON.parse(fs.readFileSync(file,'utf8'));if(validRecommendations(value)){STATE.recommendations={schemaVersion:1,settings:{...value.settings}};return;} }
     catch {}
   }
   throw Error('DATA_CORRUPT: Cannot read recommendations-v1.json or its validated backup');
@@ -152,28 +149,8 @@ function getRecommendations(options) {
   }
   return {ok:true,...result,settings:{...selected}};
 }
-function getAssignments() {return {ok:true,...structuredClone(STATE.recommendations)};}
-function assignRecommendations(request={}) {
-  if(!request||typeof request!=='object'||Array.isArray(request)) throw Error('INVALID_ASSIGNMENT_REQUEST');
-  const {uids,content,requestId}=request;
-  if(!Array.isArray(uids)||!uids.length||uids.length>500||uids.some(uid=>typeof uid!=='string'||!/^\d{1,32}$/.test(uid))) throw Error('INVALID_ASSIGNMENT_UIDS');
-  if(typeof content!=='string'||!content.trim()||[...content].length>2000) throw Error('INVALID_ASSIGNMENT_CONTENT');
-  if(requestId!==undefined&&(typeof requestId!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(requestId))) throw Error('INVALID_ASSIGNMENT_REQUEST_ID');
-  const settings=validateOptions(request), unique=[...new Set(uids)];
-  const previous=requestId && STATE.recommendations.assignments.find(item=>item.requestId===requestId);
-  if(previous) {
-    if(previous.content!==content||previous.levelField!==settings.levelField||previous.threshold!==settings.threshold||JSON.stringify(previous.authors.map(a=>a.uid).sort())!==JSON.stringify(unique.slice().sort())) throw Error('ASSIGNMENT_REQUEST_CONFLICT');
-    return {ok:true,assignment:structuredClone(previous),duplicate:true};
-  }
-  const classification=classifyRecommendations(STATE.records,settings), byUid=new Map(classification.users.map(user=>[user.uid,user]));
-  if(unique.some(uid=>!byUid.has(uid))) throw Error('ASSIGNMENT_USER_NOT_FOUND');
-  const assignment={id:randomUUID(),createdAt:nowMs(),content,...settings,authors:unique.map(uid=>byUid.get(uid)),...(requestId?{requestId}:{})};
-  const next={schemaVersion:1,settings,assignments:[...STATE.recommendations.assignments,assignment]};
-  saveJson(STATE.recommendationsFile,next);STATE.recommendations=next;
-  emitStream({type:'recommendation-assigned',payload:{id:assignment.id,authorCount:assignment.authors.length}});
-  return {ok:true,assignment:structuredClone(assignment)};
-}
-
+function previewPrivateLevelTargets(request){return previewLevelTargets(getRecommendations(),request);}
+function assertPrivateLevelTargets(targets,filter){return assertLevelTargets(getRecommendations(),targets,filter);}
 function loadJson(file, target, fallback, critical = false) {
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -343,7 +320,7 @@ function ingestRealRecords(list = [], meta = {}) {
   // Build once per batch; appending keeps indices stable until the final sort.
   const records = STATE.records.slice();
   const removed = new Set();
-  const key = r => `${r.source}:${r.uidReal !== false}:${r.uid}:${dateStr(new Date(r.ts))}`;
+  const key = r => r.uidReal===false ? JSON.stringify([r.source,false,r.uid,dateStr(new Date(r.ts)),r.roomCode||r.room||'',r.nickname||'']) : `${r.source}:true:${r.uid}:${dateStr(new Date(r.ts))}`;
   const wanted = new Set(list.map(raw => String(raw.uid).trim()));
   const indices = new Map();
   records.forEach((r,i)=>{ if(wanted.has(r.uid)) indices.set(key(r),i); });
@@ -356,7 +333,7 @@ function ingestRealRecords(list = [], meta = {}) {
     if (!uid) continue;
     const observedAt = epoch(raw.lastSeenAt,epoch(raw.ts,t));
     const ts = epoch(raw.ts,observedAt);
-    const existing = records[indices.get(key({source:'room',uidReal:isReal,uid,ts}))];
+    const existing = records[indices.get(key({source:'room',uidReal:isReal,uid,ts,nickname:raw.nickname||`用户${uid.slice(-4)}`,room:raw.room||meta.room||'',roomCode:raw.roomCode||meta.roomCode||null}))];
     if (existing && observedAt < epoch(existing.lastSeenAt,epoch(existing.ts,0))) { unchanged++; continue; }
     const rec = {
       uid,
@@ -380,6 +357,9 @@ function ingestRealRecords(list = [], meta = {}) {
     for(const field of ['wealthLevel','charmLevel']) {
       const value=normalizeLevel(raw[field]);
       if(value!==null) rec[field]=value;
+    }
+    if(raw.publicIdentityType==='nice_number'&&typeof raw.publicIdentityValue==='string'&&/^\d{1,32}$/.test(raw.publicIdentityValue)) {
+      rec.publicIdentityType='nice_number';rec.publicIdentityValue=raw.publicIdentityValue;
     }
     if (['male','female'].includes(rec.sex) && raw.sexEvidence && ['gender_badge_text','gender_badge_symbol'].includes(raw.sexEvidence.kind) && raw.sexEvidence.sex===rec.sex && Number.isFinite(raw.sexEvidence.confidence) && raw.sexEvidence.confidence>=0 && raw.sexEvidence.confidence<=1) {
       rec.sexEvidence={kind:raw.sexEvidence.kind,sex:rec.sex,confidence:raw.sexEvidence.confidence};
@@ -413,6 +393,7 @@ function ingestRealRecords(list = [], meta = {}) {
     const recordKey = key(rec), idx = indices.get(recordKey);
     if (idx !== undefined) {
       const prev = records[idx];
+      if(!isReal&&rec.nickname===prev.nickname&&(rec.roomCode||rec.room||'')===(prev.roomCode||prev.room||'')&&rec.sex==='unknown'&&['female','male'].includes(prev.sex))rec.sex=prev.sex;
       if (isReal) {
         if(rec.sex === 'unknown' && ['female','male'].includes(prev.sex)) rec.sex = prev.sex;
         if(!rec.guild) { rec.guild = prev.guild || ''; rec.guildKnown = prev.guildKnown === true || !!rec.guild; }
@@ -559,7 +540,7 @@ function getStats(date = dateStr()) {
 function getRecords(date, sex, page = 1, size = 50, keyword = '') {
   let list = STATE.records.filter(r => !date || dateStr(new Date(r.ts)) === date);
   const query = String(keyword || '').trim().toLocaleLowerCase();
-  if (query) list = list.filter(r => [r.uid, r.nickname, r.room].some(value => String(value || '').toLocaleLowerCase().includes(query)));
+  if (query) list = list.filter(r => [r.uid, r.nickname, r.room, r.publicIdentityType==='nice_number'?r.publicIdentityValue:''].some(value => String(value || '').toLocaleLowerCase().includes(query)));
   size = Number.isFinite(Number(size)) && Number(size) > 0 ? Math.max(1, Math.min(500, Math.floor(Number(size)))) : 50;
   page = Number.isFinite(Number(page)) ? Math.floor(Number(page)) : 1;
   if (sex === 'female' || sex === 'male' || sex === 'unknown') list = list.filter(r => r.sex === sex);
@@ -615,7 +596,7 @@ function getTargetsByHour(date, hour, gender, guild) {
   if (gender === 'm') list = list.filter(p => p.sex === 'male');
   if (guild === 'has') list = list.filter(p => p.guild);
   if (guild === 'none') list = list.filter(p => p.guildKnown === true && !p.guild);
-  return list.map(p => p.uid);
+  return list.filter(p=>p.uidReal!==false&&/^\d{1,32}$/.test(p.uid)).map(p => p.uid);
 }
 
 function getStatus() {
@@ -757,7 +738,7 @@ function resolvePending({ machineCode, targetUid, runId, resolution } = {}) {
   return recordOutcome({ ...pending, outcome: resolution === 'confirmed' ? 'confirmed_ui' : 'failed', stage: 'manual_review', reason: resolution === 'confirmed' ? 'MANUALLY_CONFIRMED' : 'MANUALLY_NOT_SENT', manualResolution: resolution, evidence: { ...pending.evidence, manualReview: true, resolution } });
 }
 return {
-  getRecommendations, assignRecommendations, getAssignments,
+  getRecommendations, previewPrivateLevelTargets, assertPrivateLevelTargets,
   init, shutdown, recordOutcome, resolvePending, isPending, getPendingResults, getLegacyCounts, getConfig, setConfig, allConfig,
   getDates, getStats, getRecords, getSummary, getTargetsByHour, getStatus,
   setStreamCallback, recordSend, getCounts, isSentToday, markSent,

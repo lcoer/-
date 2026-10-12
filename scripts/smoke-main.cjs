@@ -19,11 +19,18 @@ app.whenReady().then(async () => {
     throw Error('SMOKE_DEVICE_DISABLED');
   };
   store.init();
+  // Each isolated smoke run starts with its own known observation fixtures.
+  store.clearDemoRecords(true);
   const { startStaticServer } = load('electron/services/static-server.js');
   const { server, port } = await startStaticServer({ port: 0 });
   const win = new BrowserWindow({ width: 1360, height: 860, show: false, webPreferences: { preload: path.join(productRoot, 'electron/preload.js'), contextIsolation: true, nodeIntegration: false, offscreen: true, backgroundThrottling: false } });
   const ctx = { getMainWindow: () => win };
   const errors = [];
+  // Acceptance UI must start with external networking unavailable.
+  win.webContents.session.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*']},(details,callback)=>{
+    const host=new URL(details.url).hostname;
+    callback({cancel:host!=='127.0.0.1'&&host!=='localhost'});
+  });
   win.webContents.on('console-message', (_e, level, message) => {
     if (level >= 3 && !message.includes('net::ERR'))
       errors.push(message);
@@ -36,6 +43,11 @@ app.whenReady().then(async () => {
   try {
     await win.loadURL(`http://127.0.0.1:${port}/index.html`);
     await win.webContents.executeJavaScript('window.__appReady');
+    const localFonts=await win.webContents.executeJavaScript(`(async()=>{
+      const families=['Inter','JetBrains Mono','Material Symbols Outlined'];
+      for(const family of families){const faces=await document.fonts.load('400 16px "'+family+'"');if(!faces.length||faces.some(face=>face.status!=='loaded'))throw Error('Local font unavailable: '+family);}
+      return true;
+    })()`);
     const checks = await win.webContents.executeJavaScript(`(async()=>{
       const policy=await import('/engine/task-policy.mjs');
       const config=await window.api.config.get('settings');
@@ -44,6 +56,7 @@ app.whenReady().then(async () => {
       const rejected=await window.api.task.start('private',{contents:[],targets:[]});
       return {mode:config.executionMode,mediaDisabled:document.getElementById('copyImageEnable').disabled,emptyRejected:!empty.ok,mainValidation:!rejected.ok&&rejected.reason.startsWith('EMPTY_CONTENT'),today:dates.today,ui:!!document.getElementById('taskPrivatePending')};
   })()`);
+    checks.localFontsOffline=localFonts;
     if (checks.mode !== 'android' || !checks.mediaDisabled || !checks.emptyRejected || !checks.mainValidation || !checks.ui)
       throw Error(`Renderer assertions failed: ${JSON.stringify(checks)}`);
     Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
@@ -110,7 +123,8 @@ app.whenReady().then(async () => {
       {uid:'810001',uidReal:true,nickname:'等级37<&>',wealthLevel:37,charmLevel:103,sex:'female'},
       {uid:'810002',uidReal:true,nickname:'等级54',wealthLevel:54,charmLevel:1,sex:'male'},
       {uid:'810003',uidReal:true,nickname:'隐藏等级',wealthLevel:'?',charmLevel:'?',sex:'male'},
-      {uid:'810004',uidReal:true,nickname:'尚未读取',sex:'unknown'}
+      {uid:'810004',uidReal:true,nickname:'尚未读取',sex:'unknown'},
+      {uid:'nsmoke-vanity-hint',uidReal:false,nickname:'待核验档案<&>',room:'独立测试房间',roomCode:'smoke-room',publicIdentityType:'nice_number',publicIdentityValue:'22217',wealthLevel:37,charmLevel:'?',sex:'female'}
     ]);
     Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
       document.querySelector('.nav-item[data-view="recommendation"]').click();
@@ -118,26 +132,53 @@ app.whenReady().then(async () => {
       document.getElementById('recommendThreshold').value='54';
       await RecommendationView.saveClassification();
       const list=await window.api.recommendation.list();
+      if(list.users.some(user=>user.uid==='nsmoke-vanity-hint'||user.uid==='22217'))throw Error('Unverified vanity identity became recommendation author');
       if(getComputedStyle(document.getElementById('recommendEmpty')).display!=='none')throw Error('Empty recommendation hint visible with users');
       const group=uid=>list.users.find(user=>user.uid===uid)?.group;
       if(group('810001')!=='low'||group('810002')!=='high'||group('810003')!=='high'||group('810004')!=='unclassified')throw Error('Level boundary or question mark grouping failed');
-      const checkbox=document.querySelector('#recommendRows input[data-uid="810002"]');checkbox.click();
-      document.querySelector('#recommendRows tr[data-uid="810003"]').click();
-      document.getElementById('recommendContent').value='推荐内容<&> 😀\\n指定两位作者';
-      document.getElementById('recommendContent').dispatchEvent(new Event('input'));
-      await RecommendationView.assign();
-      const history=await window.api.recommendation.assignments();
-      const latest=history.assignments.at(-1);
-      const assigned=latest&&latest.authors.map(user=>user.uid).sort().join(',')==='810002,810003';
-      if(!assigned||latest.content!=='推荐内容<&> 😀\\n指定两位作者')throw Error('Author assignment or content round trip failed');
-      if(document.getElementById('recommendSelectedCount').textContent!=='已选 0 人')throw Error('Selection was not cleared');
-      const before=history.assignments.length;await RecommendationView.assign();
-      if((await window.api.recommendation.assignments()).assignments.length!==before)throw Error('Empty repeat assignment saved');
-      return {recommendationClassification:true,recommendationSelection:true,authorAssignment:true};
+      if(document.querySelector('#recommendRows input')||document.getElementById('recommendContent')||window.api.recommendation.assign||window.api.recommendation.assignments)throw Error('Removed recommendation actions remain exposed');
+      return {recommendationClassification:true,recommendationActionsRemoved:true};
+    })()`));
+    Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
+      document.querySelector('.nav-item[data-view="ranking"]').click();
+      GuestView.onStream({type:'batch',payload:{added:1}});
+      let card;const deadline=Date.now()+3000;
+      do{card=[...document.querySelectorAll('#guestGrid .guest-card')].find(item=>item.textContent.includes('待核验档案<&>'));if(card)break;await new Promise(resolve=>setTimeout(resolve,30));}while(Date.now()<deadline);
+      if(!card||!card.textContent.includes('待核验')||!card.textContent.includes('靓号')||!card.textContent.includes('22217')||!card.textContent.includes('财富等级')||!card.textContent.includes('37')||!card.textContent.includes('???（隐藏）')||!card.textContent.includes('女神'))throw Error('Unverified public profile rendering failed');
+      if(card.textContent.includes('nsmoke-vanity-hint'))throw Error('Placeholder hash displayed as real UID');
+      return {vanityProfileRendering:true};
+    })()`));
+    Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
+      document.querySelector('.nav-item[data-view="task"]').click();
+      await window.api.config.set('settings',{executionMode:'demo'});
+      const source=document.querySelector('input[name="source"][value="local"]');source.checked=true;source.dispatchEvent(new Event('change'));
+      document.getElementById('localIdList').value='810001\\n810002\\n810003\\n810004';
+      document.getElementById('delayMin').value='0';document.getElementById('delayMax').value='0';document.getElementById('sendLimit').value='0';
+      const enabled=document.getElementById('privateLevelEnabled'),high=document.getElementById('privateLevelHigh'),low=document.getElementById('privateLevelLow'),button=document.getElementById('taskPrivateStart');
+      const original=Dialog.confirm;let prompt='';Dialog.confirm=async text=>{prompt=text;return true;};
+      try{
+        for(const [useHigh,useLow,count] of [[true,false,2],[false,true,1],[true,true,3]]){
+          enabled.checked=true;high.checked=useHigh;low.checked=useLow;
+          for(const input of [enabled,high,low])input.dispatchEvent(new Event('change'));
+          button.click();const deadline=Date.now()+4000;let status;
+          do{await new Promise(r=>setTimeout(r,30));status=await window.api.task.getStatus();if(!button.disabled&&!status.private.running)break;if(Date.now()>deadline)throw Error('Level-filter UI did not settle');}while(true);
+          if(status.private.stats.simulated!==count||status.private.stats.ok!==0)throw Error('Wrong level-filter recipients: '+JSON.stringify(status.private));
+          if(!prompt.includes('等级筛选')||!prompt.includes('未识别或未核验 1 人'))throw Error('Level exclusion count missing from confirmation');
+        }
+        let confirmations=0;Dialog.confirm=async()=>{confirmations++;return true;};high.checked=false;low.checked=false;high.dispatchEvent(new Event('change'));low.dispatchEvent(new Event('change'));button.click();await new Promise(r=>setTimeout(r,150));if(confirmations)throw Error('Empty level selection started task');
+        high.checked=true;high.dispatchEvent(new Event('change'));await new Promise(r=>setTimeout(r,100));
+        const preference=await window.api.config.get('privateLevelFilter');if(!preference.enabled||preference.groups.join()!=='high')throw Error('Level preference not saved');
+        enabled.checked=false;enabled.dispatchEvent(new Event('change'));
+        const saveDeadline=Date.now()+2000;while((await window.api.config.get('privateLevelFilter')).enabled){if(Date.now()>saveDeadline)throw Error('Disabled preference not saved');await new Promise(r=>setTimeout(r,30));}
+        return {consoleHighLowSelection:true,consoleUnknownExcluded:true,consoleEmptySelectionRejected:true,consoleLevelPreferenceSaved:true};
+      }finally{Dialog.confirm=original;await window.api.config.set('settings',{executionMode:'android'});}
     })()`));
     const reload=store.createDataStore({dataDir:path.join(out,'user-data')});reload.init();
-    if(!reload.getAssignments().assignments.some(item=>item.authors.some(author=>author.uid==='810002')))throw Error('Author assignment did not survive restart');
-    reload.shutdown();checks.assignmentRestart=true;
+    const levelPreference=reload.getConfig('privateLevelFilter');
+    if(levelPreference?.enabled!==false||levelPreference.groups.join()!=='high')throw Error('Level preference did not survive restart');
+    checks.consoleLevelPreferenceRestart=true;
+    if(reload.getRecommendations().threshold!==54)throw Error('Classification threshold did not survive restart');
+    reload.shutdown();checks.classificationRestart=true;
     for (const view of ['ranking', 'recommendation', 'rules', 'task', 'copywriting', 'blacklist', 'settings']) {
       await win.webContents.executeJavaScript(`document.querySelector('.nav-item[data-view="${view}"]').click()`);
       const active = await win.webContents.executeJavaScript(`document.querySelector('.nav-item.active')?.dataset.view`);
@@ -146,11 +187,7 @@ app.whenReady().then(async () => {
       await new Promise(r => setTimeout(r, 450));
       const shot = await win.webContents.capturePage();
       fs.writeFileSync(path.join(out, `${view}.png`), shot.toPNG());
-      if(view==='recommendation') {
-        await win.webContents.executeJavaScript("document.getElementById('recommendContent').scrollIntoView({block:'center'})");
-        await new Promise(resolve=>setTimeout(resolve,100));
-        fs.writeFileSync(path.join(out,'recommendation-authors.png'),(await win.webContents.capturePage()).toPNG());
-      }
+
     }
     if (errors.length)
       throw Error(errors.join('\n'));

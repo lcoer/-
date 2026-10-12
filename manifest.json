@@ -1,8 +1,8 @@
 {
   "manifestVersion": "2.0",
-  "updatedAt": "2026-10-09",
+  "updatedAt": "2026-10-12",
   "project": "双鱼部落写作业机器人",
-  "appVersion": "1.3.2",
+  "appVersion": "1.3.5",
   "architecture": {
     "type": "Electron + ADB + Android AccessibilityService",
     "ui": "design/",
@@ -22,12 +22,19 @@
     "privateImage": false,
     "privateVoice": false,
     "collect": "bounded multi-room traversal, member pagination and matched public user-card UID resolution; not a complete online roster",
-    "welcome": "available welcome control only; skip if absent",
-    "call": "available expression control only; no silent text fallback",
+    "welcome": false,
+    "call": false,
     "cloudBackend": false,
     "taskConcurrency": "one device operation at a time",
     "demo": "explicit choice; no real sends or real-send statistics"
   },
-  "outcomes": ["confirmed_ui", "failed", "unconfirmed", "cancelled", "skipped", "simulated"],
+  "outcomes": [
+    "confirmed_ui",
+    "failed",
+    "unconfirmed",
+    "cancelled",
+    "skipped",
+    "simulated"
+  ],
   "deliveryGuarantee": "UI confirmation is not server delivery confirmation"
 }

@@ -51,15 +51,24 @@ test('unknown-gender cache expires and profile budget rotates across remaining u
 test('maxProfiles limits attempts and wrong room code prevents clicks',async()=>{const d=driver([room,card(),card(),room]);const r=await resolveVisibleRoomUsers(d,[...users,{uid:'nb',uidReal:false,nickname:'B'}],{maxProfiles:1});assert.equal(r.profilesRead,1);assert.equal(r.reason,'max_profiles');const other=driver([room]);await resolveVisibleRoomUsers(other,users,{roomCode:'9999'});assert.equal(other.taps.length,0);});
 test('blank preload fields are waited for before identity is emitted',async()=>{const d=driver([room,card('',''),card(),card(),room]);const r=await resolveVisibleRoomUsers(d,users);assert.equal(r.resolved[0].uid,'12345678');assert.equal(d.taps.length,1);assert.equal(d.backs,1);});
 test('card overlay with room behind it is not accepted as room readiness',async()=>{const d=driver([[...room,...card()]]);const r=await resolveVisibleRoomUsers(d,users);assert.equal(r.reason,'not_in_room');assert.equal(d.taps.length,0);});
-test('hidden matching nickname or code is never identity proof',async()=>{for(const field of ['tv_nickname','tv_user_code']){const c=card().map(node=>node.shortId===field?{...node,x2:node.x}:node);const d=driver([room,c,c,room]);const r=await resolveVisibleRoomUsers(d,users,{maxDurationMs:40});assert.equal(r.resolved.length,0);assert.equal(d.backs,1);}});
+test('hidden matching nickname or code is never identity proof',async()=>{for(const field of ['tv_nickname','tv_user_code']){const c=card().map(node=>node.shortId===field?{...node,x2:node.x}:node);const d=driver([room]);d.bridge.dumpUi=async()=>({nodes:d.taps.length&&!d.backs?c:room});const r=await resolveVisibleRoomUsers(d,users,{maxDurationMs:200});assert.equal(r.resolved.length,0);assert.equal(d.backs,1);}});
 test('foreign first root prevents identity publication and back',async()=>{const c=card().map((node,i)=>i===0?{...node,packageName:'other.app'}:node);const d=driver([room,c,c]);const r=await resolveVisibleRoomUsers(d,users,{maxDurationMs:40});assert.equal(r.resolved.length,0);assert.equal(d.backs,0);});
 test('missing expected room code does not permit a profile click',async()=>{const d=driver([room.filter(node=>node.shortId!=='tv_room_code').concat(n('layout_online_user'))]);const r=await resolveVisibleRoomUsers(d,users,{roomCode:'9277'});assert.equal(r.reason,'room_unverified');assert.equal(d.taps.length,0);});
 test('card marker with invalid geometry never authorizes back',async()=>{const c=card().map(node=>node.shortId==='rv_top_bg'?{...node,x2:node.x}:node);const d=driver([room,c,c]);const r=await resolveVisibleRoomUsers(d,users,{maxDurationMs:40});assert.equal(r.resolved.length,0);assert.equal(d.backs,0);});
 
-test('operation-row card with nice number only is closed without emitting an unproved UID',async()=>{
+test('operation-row card stores public attributes as a hint without emitting an unproved UID',async()=>{
  const alternative=[...card().filter(n=>n.shortId!=='tv_user_code'&&n.shortId!=='tv_user_operate_item'),n('tv_nice_num','111105',{y:1280,y2:1319}),n('iv_copy','',{y:1280,y2:1319}),...['关注','送礼','私聊Ta'].map((text,i)=>n('tv_user_operate_item',text,{x:200+i*200,x2:350+i*200,y:1756,y2:1815}))];
  const d=driver([]);d.bridge.dumpUi=async()=>({nodes:d.taps.length&&!d.backs?alternative:room});
- const r=await resolveVisibleRoomUsers(d,users,{maxDurationMs:50});assert.equal(r.resolved.length,0);assert.equal(d.backs,1);
+ d.readProfileGender=async(_nodes,options)=>{assert.equal(options.expectedUid,undefined);assert.equal(options.expectedNiceNumber,'111105');return {sex:'male'};};
+ d.readProfileLevels=async()=>({charmLevel:195});
+ const r=await resolveVisibleRoomUsers(d,users,{maxDurationMs:1000});assert.equal(r.resolved.length,1);assert.equal(d.backs,1);
+ const result=r.resolved[0];assert.equal(result.uidReal,false);assert.match(result.uid,/^n[a-f0-9]{24}$/);assert.notEqual(result.uid,'111105');assert.equal(result.publicIdentityValue,'111105');assert.equal(result.sex,'male');assert.equal(result.charmLevel,195);assert.equal(result.wealthLevel,undefined);
+});
+test('a themed card changing its public identity during capture never publishes attributes',async()=>{
+ const alternative=[...card().filter(n=>n.shortId!=='tv_user_code'&&n.shortId!=='tv_user_operate_item'),n('tv_nice_num','111105',{y:1280,y2:1319}),n('iv_copy','',{y:1280,y2:1319}),...['关注','送礼','私聊Ta'].map((text,i)=>n('tv_user_operate_item',text,{x:200+i*200,x2:350+i*200,y:1756,y2:1815}))];
+ let changed=false;const d=driver([]);d.bridge.dumpUi=async()=>({nodes:d.taps.length&&!d.backs?alternative.map(n=>changed&&n.shortId==='tv_nice_num'?{...n,text:'222222'}:n):room});
+ d.readProfileGender=async()=>{changed=true;return {sex:'male'};};
+ const result=await resolveVisibleRoomUsers(d,users,{maxDurationMs:1000});assert.equal(result.resolved.length,0);assert.equal(result.reason,'identity_mismatch');
 });
 
 test('verified known-gender users still receive missing level enrichment and unknown-level cache retries',async()=>{

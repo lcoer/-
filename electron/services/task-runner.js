@@ -187,6 +187,7 @@ function createTaskRunner(deps = {}) {
       const [{ validatePrivateConfig }] = await modules, checked = validatePrivateConfig(config);
       if (!checked.ok)
         throw Error(checked.reason);
+      if(config.levelFilter!=null)dataStore.assertPrivateLevelTargets(checked.config.targets,config.levelFilter);
       if (checked.duplicates.length)
         log('private', 'skip', `去除 ${checked.duplicates.length} 个重复目标`);
       if (t.mode === 'android') {
@@ -206,6 +207,7 @@ function createTaskRunner(deps = {}) {
         dataStore.setConfig('settings', { ...currentSettings, senderDeviceKey: t.senderDeviceKey });
         t.machineCode = dataStore.getMachineCode();
       }
+      if(config.levelFilter!=null)dataStore.assertPrivateLevelTargets(checked.config.targets,config.levelFilter);
       return checked.config;
     }, async (t, cfg) => {
       const signal = t.controller.signal, black = new Set((cfg.blacklist || []).map(String)), machine = t.machineCode || dataStore.getMachineCode();
