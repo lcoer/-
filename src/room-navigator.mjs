@@ -1,5 +1,6 @@
 import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
 import { isOperationRoomCard } from './room-card.mjs';
+import {isContributionPage} from './contribution-scanner.mjs';
 const PACKAGE = 'com.sybl.voiceroom';
 const inside = (node, parent) => node.x >= parent.x && node.y >= parent.y && node.x2 <= parent.x2 && node.y2 <= parent.y2;
 export function isRoomPasswordGate(nodes) {
@@ -210,7 +211,7 @@ export class RoomNavigator {
     for (let step=0;step<4;step++) {
       const page=this._auxiliaryPage(nodes);
       if (!page) break;
-      const back=nodes.filter(n=>n.shortId==='iv_back');
+      const back=nodes.filter(n=>n.shortId===(page==='contribution-rank'?'ivToolbarBack':'iv_back'));
       if(back.length!==1)return null;
       await this._tap(back[0]);
       nodes=await this._wait(current=>this._auxiliaryPage(current)!==page?current:null);
@@ -280,10 +281,11 @@ export class RoomNavigator {
     return this._wait(current => this._homeList(current) ? current : null);
   }
   _auxiliaryPage(nodes) {
+    if(isContributionPage(nodes))return 'contribution-rank';
     const one=id=>nodes.filter(n=>n.shortId===id).length===1;
     if(!one('iv_back'))return null;
     if(one('input_message')&&one('iv_send')&&one('tv_nickname'))return 'private-chat';
-    if(one('iv_chat')&&one('iv_follow')&&(one('iv_copy')||one('ll_copy'))&&one('tv_nickname')&&
+    if(one('iv_chat')&&(one('iv_copy')||one('ll_copy'))&&one('tv_nickname')&&
       nodes.some(n=>['tv_nice_num','tv_user_code'].includes(n.shortId)&&/^\d+$/.test(n.text||'')))return 'full-profile';
     if(one('et_search')&&one('tv_search'))return 'search-entry';
     if(one('et_search')&&one('tv_cancel')&&nodes.some(n=>n.text==='用户'&&n.clickable))return 'search-results';
@@ -293,6 +295,14 @@ export class RoomNavigator {
     if (preferredRoomName != null)
       this.preferredRoomName = String(preferredRoomName).trim() || null;
     let nodes = await this._snapshot();
+    if(isContributionPage(nodes)){
+      const backs=nodes.filter(n=>n.shortId==='ivToolbarBack'&&n.clickable&&this._visible(n));
+      if(backs.length!==1)return null;
+      await this._tap(backs[0]);
+      const restored=await this._wait(current=>this._room(current));
+      if(!restored)return null;
+      nodes=restored.nodes;
+    }
     nodes = await this._recoverUserCard(nodes);
     if (!nodes)
       return null;

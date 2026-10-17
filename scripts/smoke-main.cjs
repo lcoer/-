@@ -24,7 +24,9 @@ app.whenReady().then(async () => {
   const { startStaticServer } = load('electron/services/static-server.js');
   const { server, port } = await startStaticServer({ port: 0 });
   const win = new BrowserWindow({ width: 1360, height: 860, show: false, webPreferences: { preload: path.join(productRoot, 'electron/preload.js'), contextIsolation: true, nodeIntegration: false, offscreen: true, backgroundThrottling: false } });
-  const ctx = { getMainWindow: () => win };
+  // Business regression uses an explicitly granted test authorization.
+  // Production main.js always supplies the real offline-license gate.
+  const ctx = { getMainWindow: () => win,authorize:()=>{} };
   const errors = [];
   // Acceptance UI must start with external networking unavailable.
   win.webContents.session.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*']},(details,callback)=>{
@@ -38,6 +40,9 @@ app.whenReady().then(async () => {
   win.webContents.on('render-process-gone', (_e, d) => errors.push(`Renderer exited ${d.reason}`));
   load('electron/ipc/data-ipc.js').registerDataIpc(ctx);
   load('electron/ipc/task-ipc.js').registerTaskIpc(ctx);
+  const runner=load('electron/services/task-runner.js');
+  runner.setLogCallback(entry=>{if(!win.isDestroyed())win.webContents.send('task:log',entry);});
+  runner.setStatusCallback(status=>{if(!win.isDestroyed())win.webContents.send('task:status',status);});
   load('electron/ipc/system-ipc.js').registerSystemIpc(ctx);
   load('electron/ipc/window-ipc.js').registerWindowIpc(ctx);
   try {
@@ -87,7 +92,9 @@ app.whenReady().then(async () => {
     })()`));
     if (!checks.senderSettings || !checks.clearKeepsDemo || !checks.legacyReview)
       throw Error(`Review fix assertions failed: ${JSON.stringify(checks)}`);
+    store.ingestRealRecords([{uid:'11111',uidReal:true,nickname:'Selected fixture',wealthLevel:54}]);
     Object.assign(checks, await win.webContents.executeJavaScript(`(async()=>{
+      await RecommendationView.refresh();document.querySelector('#recommendRows input[data-uid="11111"]').click();
       const input=document.getElementById('copywritingNewInput');
       input.value='😀'.repeat(2001);document.getElementById('copywritingAddBtn').click();
       const oversizedDraftPreserved=[...input.value].length===2001;
@@ -102,7 +109,7 @@ app.whenReady().then(async () => {
       await window.api.config.set('settings',{executionMode:'demo'});
       const originalConfirm=Dialog.confirm;let confirmations=0;
       Dialog.confirm=async()=>{confirmations++;await new Promise(resolve=>setTimeout(resolve,120));return false;};
-      const button=document.getElementById('taskPrivateStart');button.click();button.click();
+      const button=document.getElementById('taskPrivateStart');const idleDeadline=Date.now()+3000;while(button.disabled){if(Date.now()>idleDeadline)throw Error('Mode change did not release device');await new Promise(r=>setTimeout(r,30));}button.click();button.click();
       const cancelDeadline=Date.now()+3000;
       while(button.disabled){if(Date.now()>cancelDeadline)throw Error('Preparation did not settle');await new Promise(resolve=>setTimeout(resolve,30));}
       const oneConfirmation=confirmations===1;
@@ -127,7 +134,7 @@ app.whenReady().then(async () => {
       {uid:'nsmoke-vanity-hint',uidReal:false,nickname:'待核验档案<&>',room:'独立测试房间',roomCode:'smoke-room',publicIdentityType:'nice_number',publicIdentityValue:'22217',wealthLevel:37,charmLevel:'?',sex:'female'}
     ]);
     Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
-      document.querySelector('.nav-item[data-view="recommendation"]').click();
+      document.querySelector('.nav-item[data-view="task"]').click();
       document.getElementById('recommendLevelField').value='wealthLevel';
       document.getElementById('recommendThreshold').value='54';
       await RecommendationView.saveClassification();
@@ -136,8 +143,8 @@ app.whenReady().then(async () => {
       if(getComputedStyle(document.getElementById('recommendEmpty')).display!=='none')throw Error('Empty recommendation hint visible with users');
       const group=uid=>list.users.find(user=>user.uid===uid)?.group;
       if(group('810001')!=='low'||group('810002')!=='high'||group('810003')!=='high'||group('810004')!=='unclassified')throw Error('Level boundary or question mark grouping failed');
-      if(document.querySelector('#recommendRows input')||document.getElementById('recommendContent')||window.api.recommendation.assign||window.api.recommendation.assignments)throw Error('Removed recommendation actions remain exposed');
-      return {recommendationClassification:true,recommendationActionsRemoved:true};
+      if(!document.querySelector('.task-view #recommendRows input')||document.querySelector('.nav-item[data-view="recommendation"]')||document.getElementById('recommendContent')||window.api.recommendation.assign)throw Error('Console recommendation integration failed');
+      return {recommendationClassification:true,recommendationMergedIntoConsole:true};
     })()`));
     Object.assign(checks,await win.webContents.executeJavaScript(`(async()=>{
       document.querySelector('.nav-item[data-view="ranking"]').click();
@@ -152,34 +159,34 @@ app.whenReady().then(async () => {
       document.querySelector('.nav-item[data-view="task"]').click();
       await window.api.config.set('settings',{executionMode:'demo'});
       const source=document.querySelector('input[name="source"][value="local"]');source.checked=true;source.dispatchEvent(new Event('change'));
-      document.getElementById('localIdList').value='810001\\n810002\\n810003\\n810004';
+      document.getElementById('localIdList').value='99999';
       document.getElementById('delayMin').value='0';document.getElementById('delayMax').value='0';document.getElementById('sendLimit').value='0';
-      const enabled=document.getElementById('privateLevelEnabled'),high=document.getElementById('privateLevelHigh'),low=document.getElementById('privateLevelLow'),button=document.getElementById('taskPrivateStart');
+      const button=document.getElementById('taskPrivateStart');
+      const idleDeadline=Date.now()+3000;while(button.disabled){if(Date.now()>idleDeadline)throw Error('Mode change did not settle');await new Promise(r=>setTimeout(r,30));}
       const original=Dialog.confirm;let prompt='';Dialog.confirm=async text=>{prompt=text;return true;};
       try{
-        for(const [useHigh,useLow,count] of [[true,false,2],[false,true,1],[true,true,3]]){
-          enabled.checked=true;high.checked=useHigh;low.checked=useLow;
-          for(const input of [enabled,high,low])input.dispatchEvent(new Event('change'));
+        await RecommendationView.refresh();document.getElementById('recommendGroupFilter').value='all';document.getElementById('recommendGroupFilter').dispatchEvent(new Event('change'));
+        for(const uids of [['810002'],['810001'],['810002','810003'],['810004']]){
+          document.getElementById('recommendClearBtn').click();
+          for(const uid of uids)document.querySelector('#recommendRows input[data-uid="'+uid+'"]').click();
+          const processed=[];const unsubscribe=window.api.task.onLog(entry=>{if(entry.task==='private'&&entry.msg.includes(': simulated'))processed.push(entry.msg.split(':')[0]);});
           button.click();const deadline=Date.now()+4000;let status;
           do{await new Promise(r=>setTimeout(r,30));status=await window.api.task.getStatus();if(!button.disabled&&!status.private.running)break;if(Date.now()>deadline)throw Error('Level-filter UI did not settle');}while(true);
-          if(status.private.stats.simulated!==count||status.private.stats.ok!==0)throw Error('Wrong level-filter recipients: '+JSON.stringify(status.private));
-          if(!prompt.includes('等级筛选')||!prompt.includes('未识别或未核验 1 人'))throw Error('Level exclusion count missing from confirmation');
+          unsubscribe();
+          if(status.private.stats.simulated!==uids.length||status.private.stats.ok!==0||processed.join()!==uids.join())throw Error('Wrong selected recipients: '+JSON.stringify({status,processed,uids}));
+          for(const uid of uids)if(!prompt.includes('UID '+uid))throw Error('Selected UID missing from confirmation');
         }
-        let confirmations=0;Dialog.confirm=async()=>{confirmations++;return true;};high.checked=false;low.checked=false;high.dispatchEvent(new Event('change'));low.dispatchEvent(new Event('change'));button.click();await new Promise(r=>setTimeout(r,150));if(confirmations)throw Error('Empty level selection started task');
-        high.checked=true;high.dispatchEvent(new Event('change'));await new Promise(r=>setTimeout(r,100));
-        const preference=await window.api.config.get('privateLevelFilter');if(!preference.enabled||preference.groups.join()!=='high')throw Error('Level preference not saved');
-        enabled.checked=false;enabled.dispatchEvent(new Event('change'));
-        const saveDeadline=Date.now()+2000;while((await window.api.config.get('privateLevelFilter')).enabled){if(Date.now()>saveDeadline)throw Error('Disabled preference not saved');await new Promise(r=>setTimeout(r,30));}
-        return {consoleHighLowSelection:true,consoleUnknownExcluded:true,consoleEmptySelectionRejected:true,consoleLevelPreferenceSaved:true};
+        let confirmations=0;Dialog.confirm=async()=>{confirmations++;return true;};document.getElementById('recommendClearBtn').click();button.click();await new Promise(r=>setTimeout(r,150));if(confirmations)throw Error('Empty selection started task');
+        const group=document.getElementById('recommendGroupFilter');group.value='high';group.dispatchEvent(new Event('change'));document.getElementById('recommendSelectAllBtn').click();group.value='low';group.dispatchEvent(new Event('change'));document.getElementById('recommendSelectAllBtn').click();
+        if(!RecommendationView.getSelection().uids.includes('810001')||!RecommendationView.getSelection().uids.includes('810003'))throw Error('Cross-group selection lost');
+        document.getElementById('recommendClearBtn').click();
+        return {selectedUsersOnly:true,selectionConfirmationShowsUids:true,emptySelectionRejected:true,selectionAcrossGroups:true,originalSourceIgnored:true};
       }finally{Dialog.confirm=original;await window.api.config.set('settings',{executionMode:'android'});}
     })()`));
     const reload=store.createDataStore({dataDir:path.join(out,'user-data')});reload.init();
-    const levelPreference=reload.getConfig('privateLevelFilter');
-    if(levelPreference?.enabled!==false||levelPreference.groups.join()!=='high')throw Error('Level preference did not survive restart');
-    checks.consoleLevelPreferenceRestart=true;
     if(reload.getRecommendations().threshold!==54)throw Error('Classification threshold did not survive restart');
     reload.shutdown();checks.classificationRestart=true;
-    for (const view of ['ranking', 'recommendation', 'rules', 'task', 'copywriting', 'blacklist', 'settings']) {
+    for (const view of ['ranking', 'rules', 'task', 'copywriting', 'blacklist', 'settings']) {
       await win.webContents.executeJavaScript(`document.querySelector('.nav-item[data-view="${view}"]').click()`);
       const active = await win.webContents.executeJavaScript(`document.querySelector('.nav-item.active')?.dataset.view`);
       if (active !== view)
@@ -191,6 +198,11 @@ app.whenReady().then(async () => {
     }
     if (errors.length)
       throw Error(errors.join('\n'));
+    await win.webContents.executeJavaScript("document.getElementById('recommendGroupFilter').value='all';document.getElementById('recommendGroupFilter').dispatchEvent(new Event('change'));document.getElementById('recommendSelectAllBtn').click()");
+    const loaded=new Promise(resolve=>win.webContents.once('did-finish-load',resolve));win.webContents.reload();await loaded;
+    await win.webContents.executeJavaScript('window.__appReady');
+    const selectionReset=await win.webContents.executeJavaScript("document.getElementById('recommendSelectedCount').textContent==='已选 0 人'");
+    if(!selectionReset)throw Error('Selection persisted without explicit new confirmation');checks.selectionResetOnReload=true;
     console.log('SMOKE PASSED', JSON.stringify(checks));
     fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ ok: true, checks, errors }, null, 2));
   }

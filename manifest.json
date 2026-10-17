@@ -2,7 +2,7 @@
   "manifestVersion": "2.0",
   "updatedAt": "2026-10-12",
   "project": "双鱼部落写作业机器人",
-  "appVersion": "1.3.5",
+  "appVersion": "1.4.2",
   "architecture": {
     "type": "Electron + ADB + Android AccessibilityService",
     "ui": "design/",
@@ -36,5 +36,12 @@
     "skipped",
     "simulated"
   ],
-  "deliveryGuarantee": "UI confirmation is not server delivery confirmation"
+  "deliveryGuarantee": "UI confirmation is not server delivery confirmation",
+  "activation": {
+    "mode": "offline-signed-code",
+    "defaultDays": 7,
+    "startsAt": "first-successful-activation",
+    "machineBound": false,
+    "oneUseScope": "local-records"
+  }
 }

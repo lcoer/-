@@ -1,5 +1,6 @@
 import { RoomNavigator } from './room-navigator.mjs';
 import { scanRoomMembers } from './member-scanner.mjs';
+import {scanDailyContribution} from './contribution-scanner.mjs';
 import { resolveVisibleRoomUsers } from './room-user-resolver.mjs';
 import { abortableSleep, throwIfAborted, isAbortError } from './async-control.mjs';
 export class CollectionController {
@@ -87,9 +88,13 @@ export class CollectionController {
       }
     };
     this.pending = collect();
-    await this.pending;
+    // Ranking/profile scans can take longer than device preparation. Report
+    // running immediately, keeping the first scan inside the cancellable loop.
+    if(this.opts.collectionSource!=='dailyContribution')await this.pending;
     if (!this.stopped && !this.signal.aborted) {
+      const initial=this.pending;
       this.pending = (async () => {
+        await initial;
         while (!this.stopped) {
           try {
             await abortableSleep(this.cycleWait ? this.cooldownMs : this.intervalMs, this.signal);
@@ -222,6 +227,23 @@ export class CollectionController {
     this.visitedRooms.add(roomKey);
     this.knownRoomNames.add(meta.room);
     this.onRoom(meta.room);
+    if(this.opts.collectionSource==='dailyContribution'){
+      const result=await (this.opts.contributionScanner||scanDailyContribution)(this.driver,{...meta,signal:this.signal,maxPages:this.opts.maxPages||6,maxProfiles:this.opts.maxProfiles??6,knownMappings:this.resolvedHintCache,attemptHistory:this.profileAttempts,
+        onLog:(l,m)=>this.log(l,m),onUsers:async users=>{
+          await this._publish(users,meta);
+          for(const user of users.filter(u=>u.seenFrom==='roomProfile')){
+            const cached={uid:user.uid,sex:user.sex,wealthLevel:user.wealthLevel,charmLevel:user.charmLevel,at:this.clock(),retryAfter:this.clock()+10000};
+            this.resolvedHintCache.set(user.resolvedFrom||user.uid,cached);this.resolvedHintCache.set(user.uid,cached);
+          }
+        }});
+      throwIfAborted(this.signal);if(this.stopped)return;
+      this.stats.pagesScanned+=result.pages;this.stats.profilesRead+=result.profilesRead;
+      this.stats.memberStatus=result.status;this.stats.profileStatus=result.reason;
+      if(result.status==='unavailable')this.log('warn',`今日房间贡献榜暂不可用（${result.reason}），不会改采其他名单。`);
+      this.rounds++;this.consecutiveErrors=0;this.stats.scanDurationMs=Math.max(0,this.clock()-started);
+      this.log('info',`今日贡献榜：本轮新发现真实 UID ${this.stats.lastRoundNew}，累计 ${this.stats.newVerified}；榜单 ${this.stats.pagesScanned} 页，资料检查 ${this.stats.profilesRead} 次（${result.reason}）`);
+      this.advance=this.scope==='multi'&&!this.roomName;this._progress();return;
+    }
     let visibleUsers = this.opts.extractUsers(meta.nodes, { room: meta.room, roomCode: meta.roomCode, now: this.clock() });
     await this._publish(visibleUsers, meta);
     if (this.scanMembers && this.driver.bridge && !this.signal?.aborted && this.clock() - (this.memberScans.get(roomKey) ?? -Infinity) >= 30000) {

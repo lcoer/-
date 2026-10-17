@@ -10,7 +10,7 @@ function load({boot=false,stop=async()=>{}}={}){
   const electron={app,BrowserWindow:{getAllWindows:()=>[]},Menu:{},globalShortcut:{unregisterAll(){}},dialog:{showErrorBox:()=>calls.push('errorDialog')}};
   const store={init:()=>{throw Error('DATA_CORRUPT');},shutdown:()=>calls.push('storeShutdown')};
   const server={close:()=>calls.push('serverClosed'),closeAllConnections:()=>calls.push('connectionsClosed')};
-  const mocks={electron,'./services/task-runner':{stopAll:stop},'./services/data-store':store,'./config':{},'./services/static-server':{startStaticServer:async()=>({server,port:1})},fs:{mkdirSync(){},existsSync:()=>false,appendFileSync(){}},'./ipc/window-ipc':{},'./ipc/task-ipc':{},'./ipc/data-ipc':{},'./ipc/system-ipc':{}};
+  const mocks={electron,'./services/task-runner':{stopAll:stop},'./services/data-store':store,'./config':{},'./services/offline-license.cjs':{createOfflineLicense:()=>({initialize:async()=>{},getStatus:()=>({active:true}),close(){}})},'./license-config.json':{},'./ipc/license-ipc':{},'./services/static-server':{startStaticServer:async()=>({server,port:1})},fs:{mkdirSync(){},existsSync:()=>false,appendFileSync(){}},'./ipc/window-ipc':{},'./ipc/task-ipc':{},'./ipc/data-ipc':{},'./ipc/system-ipc':{}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../electron/main.js'),'utf8'),{
     require:n=>Object.hasOwn(mocks,n)?mocks[n]:require(n),__dirname:path.join(__dirname,'../electron'),
     process:{env:{},versions:{},pid:1,argv:[],on(){},platform:'win32',exit:()=>{}},global:{},console:{log(){},error(){}},setTimeout,

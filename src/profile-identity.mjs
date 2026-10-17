@@ -23,6 +23,7 @@ export function profileIdentity(nodes,{expectedUid,expectedNiceNumber,expectedNi
  }
  if(typeof expectedNiceNumber!=='string'||!/^\d{1,32}$/.test(expectedNiceNumber)||codes.some(n=>value(n)))return null;
  const nice=nodes.filter(n=>id(n)==='tv_nice_num'&&visible(n));
- if(nice.length!==1||value(nice[0])!==expectedNiceNumber||!isOperationRoomCard(nodes.filter(visible)))return null;
+ const publicProfile=['iv_chat','iv_back'].every(key=>nodes.some(n=>id(n)===key&&visible(n)))&&nodes.some(n=>['iv_copy','ll_copy'].includes(id(n))&&visible(n));
+ if(nice.length!==1||value(nice[0])!==expectedNiceNumber||(!isOperationRoomCard(nodes.filter(visible))&&!publicProfile))return null;
  return {visible,kind:'nice_number',value:expectedNiceNumber,nickname:value(names[0])};
 }

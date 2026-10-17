@@ -40,5 +40,7 @@ user-data/
 .workbuddy/
 exports/
 .env
+offline-license-tool/private/
+license-server/data/
 .env.*
 !.env.example

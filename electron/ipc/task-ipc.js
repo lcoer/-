@@ -18,6 +18,7 @@ function registerTaskIpc(ctx) {
 
   handle('task:status', () => taskRunner.getStatus());
   handle('task:previewLevelTargets', (_e, request) => dataStore.previewPrivateLevelTargets(request));
+  handle('task:previewSelectedTargets', (_e, request) => dataStore.previewPrivateSelectedTargets(request));
   handle('task:pending', () => ({ ok: true, results: dataStore.getPendingResults() }));
   handle('task:resolvePending', async (_e, request) => taskRunner.withDeviceOperation('reviewPending', async () => {
     // Historical records retain their original sender scope, including the

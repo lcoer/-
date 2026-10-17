@@ -1,5 +1,6 @@
 import { abortableSleep, throwIfAborted } from './async-control.mjs';
 import { RoomNavigator, isRoomPasswordGate } from './room-navigator.mjs';
+import {isContributionPage} from './contribution-scanner.mjs';
 
 const PACKAGE = 'com.sybl.voiceroom';
 const inside = (node, parent) => node.x >= parent.x && node.y >= parent.y && node.x2 <= parent.x2 && node.y2 <= parent.y2;
@@ -98,7 +99,8 @@ export class PrivateNavigator {
       !nodes.some(n => ['iv_chat','et_search','rv_top_bg'].includes(n.shortId));
   }
   async _home() {
-    for (let step=0;step<6;step++) {
+    this.onLog('info','私聊准备：先返回双鱼部落首页');
+    for (let step=0;step<10;step++) {
       let nodes = await this._snapshot();
       if (nodes.length === 1 && !nodes[0].shortId && !nodes[0].text)
         nodes = await this._wait(ns => ns.length > 1 ? ns : null,'APP_LOADING_TIMEOUT');
@@ -113,7 +115,7 @@ export class PrivateNavigator {
         await this._tap(tab);
         return this._wait(ns => this._unique(ns,'ll_tab_home') && this._unique(ns,'iv_search') ? ns : null,'USER_SEARCH_UNAVAILABLE');
       }
-      if (nodes.some(n => n.shortId === 'iv_quit' || n.shortId === 'rv_top_bg' ||
+      if (isContributionPage(nodes) || nodes.some(n => n.shortId === 'iv_quit' || n.shortId === 'rv_top_bg' ||
         n.shortId === 'tvTitle' && /^房间在线用户[（(]\d+人[)）]$/.test(n.text || ''))) {
         const home = await new RoomNavigator(this.driver,{signal:this.signal,entryTimeoutMs:this.timeoutMs,pollIntervalMs:this.pollIntervalMs}).returnHome();
         if (!home) throw Error('PRIVATE_RETURN_HOME_FAILED');
@@ -121,7 +123,16 @@ export class PrivateNavigator {
       }
       const knownPage = this._unique(nodes,'iv_back') &&
         (this._unique(nodes,'et_search') || this._unique(nodes,'input_message') || this._profile(nodes));
-      if (!knownPage) throw Error('PRIVATE_NAVIGATION_UNRECOGNIZED_PAGE');
+      if (!knownPage) {
+        // Other in-app pages use different toolbar IDs. Only a unique visible
+        // back control may dismiss them; never guess coordinates or confirm dialogs.
+        const backs=nodes.filter(n=>['iv_back','ivToolbarBack','ivBack'].includes(n.shortId)&&n.clickable);
+        if(backs.length!==1)throw Error('PRIVATE_NAVIGATION_UNRECOGNIZED_PAGE: 无法自动返回首页，请手动回到双鱼部落首页后重试');
+        const before=JSON.stringify(nodes.map(n=>[n.shortId,n.text,n.x,n.y,n.x2,n.y2]));
+        await this._tap(backs[0]);
+        await this._wait(ns=>JSON.stringify(ns.map(n=>[n.shortId,n.text,n.x,n.y,n.x2,n.y2]))!==before?ns:null,'PRIVATE_RETURN_HOME_FAILED: 返回首页未完成，请手动返回首页后重试');
+        continue;
+      }
       await this._back();
       await abortableSleep(this.pollIntervalMs,this.signal);
     }

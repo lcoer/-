@@ -5,7 +5,7 @@ const root = path.resolve(__dirname, '..');
 function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : /\.(js|mjs|cjs)$/.test(e.name) ? [path.join(dir, e.name)] : []);
 }
-const files = ['electron', 'src', 'design', 'scripts', 'tests'].flatMap(d => walk(path.join(root, d)));
+const files = ['electron', 'src', 'design', 'scripts', 'tests','offline-license-tool'].flatMap(d => walk(path.join(root, d)));
 let failed = false;
 for (const file of files) {
   const r = spawnSync(process.execPath, ['--check', file], { cwd: root, encoding: 'utf8', windowsHide: true });

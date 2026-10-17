@@ -4,6 +4,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  license:{status:()=>ipcRenderer.invoke('license:status'),activate:code=>ipcRenderer.invoke('license:activate',code),retry:()=>ipcRenderer.invoke('license:retry'),openApp:()=>ipcRenderer.invoke('license:openApp')},
   recommendation: {
     list: options => ipcRenderer.invoke('recommendation:list', options),
   },
@@ -63,6 +64,7 @@ contextBridge.exposeInMainWorld('api', {
   // ===== 任务控制(私聊) =====
   task: {
     previewLevelTargets: request => ipcRenderer.invoke('task:previewLevelTargets', request),
+    previewSelectedTargets: request => ipcRenderer.invoke('task:previewSelectedTargets', request),
     // 启动任务 name:'private'
     start: (name, config) => ipcRenderer.invoke('task:start', name, config),
     stop: (name) => ipcRenderer.invoke('task:stop', name),

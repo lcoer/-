@@ -28,10 +28,12 @@ function harness(api) {
   const notices = [];
   const context = vm.createContext({
     window: { api: {config:{get:async()=>undefined},...api} },
+    RecommendationView:{setBusy(){},getSelection:()=>({uids:['123456'],revision:0,settings:{levelField:'wealthLevel',threshold:54}})},
     document: { getElementById: get, createElement: element, querySelector: () => element() },
     $$: selector => radios[selector] || [],
     toast: text => notices.push(text), escapeHtml: text => text, debounce: fn => fn,
   });
+  context.window.api.task={previewSelectedTargets:async()=>({ok:true,targets:[{uid:'123456',source:'room',uidReal:true}],selectionProof:{uids:['123456'],levelField:'wealthLevel',threshold:54,snapshot:'fixture'}}),...context.window.api.task};
   function load(file, name, transform = s => s) {
     const source = fs.readFileSync(path.join(__dirname, '..', 'design/js', file), 'utf8');
     vm.runInContext(transform(source) + `\nthis.${name} = ${name};`, context);
@@ -175,7 +177,7 @@ test('private start rejects a rule change while the asynchronous launch plan is 
  const starts=[];let rules={delayMin:1,delayMax:1,source:'local'};
  const h=harness({config:{get:async key=>key==='settings'?{executionMode:'android',senderAccountUid:'77777'}:[]},task:{getStatus:async()=>({}),onStatus(){},onLog(){},start:async(...args)=>{starts.push(args);return {ok:true};}}});
  h.context.RulesView={readForm:()=>rules,getTargets:async()=>{rules={...rules,delayMin:2};return [{uid:'12345'}];}};
- h.context.Copywriting={flush:async()=>({contents:['hello']})};h.context.Dialog={confirm:async()=>true};h.context.policy={validatePrivateConfig:config=>({ok:true,config})};
+ h.context.Copywriting={flush:async()=>{rules={...rules,delayMin:2};return {contents:['hello']};}};h.context.Dialog={confirm:async()=>true};h.context.policy={validatePrivateConfig:config=>({ok:true,config})};
  await h.load('task-console.js','TaskConsole',source=>source.replace("await import('/engine/task-policy.mjs')",'globalThis.policy')).init();await h.get('taskPrivateStart').fire('click');
  assert.equal(starts.length,0);assert.match(h.notices.at(-1),/规则.*变化/);
 });
@@ -184,11 +186,12 @@ test('parallel clicks during private preparation open only one confirmation and 
  const starts=[];let release,onStatus;const confirmations=[];
  const h=harness({config:{get:async key=>key==='settings'?{executionMode:'android',senderAccountUid:'77777'}:[]},task:{getStatus:async()=>({}),onStatus:fn=>{onStatus=fn;},onLog(){},start:async(...args)=>{starts.push(args);return {ok:true};}}});
  h.context.RulesView={readForm:()=>({}),getTargets:()=>new Promise(resolve=>{release=resolve;})};h.context.Copywriting={flush:async()=>({contents:['hello']})};
+ h.context.window.api.task.previewSelectedTargets=()=>new Promise(resolve=>{release=resolve;});
  h.context.Dialog={confirm:async text=>{confirmations.push(text);return true;}};h.context.policy={validatePrivateConfig:config=>({ok:true,config})};
  await h.load('task-console.js','TaskConsole',source=>source.replace("await import('/engine/task-policy.mjs')",'globalThis.policy')).init();
  const first=h.get('taskPrivateStart').fire('click');await new Promise(resolve=>setImmediate(resolve));
  const second=h.get('taskPrivateStart').fire('click');await new Promise(resolve=>setImmediate(resolve));onStatus({});
- assert.equal(h.get('taskPrivateStart').disabled,true);release([{uid:'12345'}]);await Promise.all([first,second]);
+ assert.equal(h.get('taskPrivateStart').disabled,true);release({ok:true,targets:[{uid:'123456',source:'room'}],selectionProof:{uids:['123456'],levelField:'wealthLevel',threshold:54}});await Promise.all([first,second]);
  assert.equal(confirmations.length,1);assert.equal(starts.length,1);
 });
 
@@ -238,4 +241,19 @@ test('concurrent rule saves are serialized so newest local targets remain persis
   h.get('localIdList').value='22222'; h.get('localIdList').fire('input');
   await new Promise(r=>setImmediate(r)); assert.equal(writes.length,1);
   release(); await new Promise(r=>setImmediate(r));assert.equal(writes.at(-1).localIdList,'22222');
+});
+
+test('selected-only console rejects empty or changed selection and ignores legacy target filters',async()=>{
+ const starts=[];let selection={uids:['123456'],revision:0,settings:{levelField:'wealthLevel',threshold:54}},rules={delayMin:0,delayMax:0,source:'local'};
+ const h=harness({config:{get:async key=>key==='settings'?{executionMode:'android',senderAccountUid:'77777'}:[]},task:{getStatus:async()=>({}),onStatus(){},onLog(){},start:async(...args)=>{starts.push(args);return {ok:true};}}});
+ h.context.RulesView={readForm:()=>rules,getTargets:()=>{throw Error('Legacy target source must not be used');}};
+ h.context.Copywriting={flush:async()=>{rules={...rules,source:'cloud',cloudDate:'2000-01-01',cloudGender:'f'};return {contents:['hello']};}};
+ h.context.policy={validatePrivateConfig:config=>({ok:true,config})};h.context.Dialog={confirm:async()=>true};
+ h.context.RecommendationView.getSelection=()=>{throw Error('请先勾选用户');};
+ await h.load('task-console.js','TaskConsole',source=>source.replace("await import('/engine/task-policy.mjs')",'globalThis.policy')).init();
+ await h.get('taskPrivateStart').fire('click');assert.equal(starts.length,0);
+ h.context.RecommendationView.getSelection=()=>selection;
+ h.context.Dialog.confirm=async()=>{selection={...selection,revision:1};return true;};
+ await h.get('taskPrivateStart').fire('click');assert.equal(starts.length,0);assert.match(h.notices.at(-1),/名单已变化/);
+ h.context.Dialog.confirm=async()=>true;await h.get('taskPrivateStart').fire('click');assert.equal(starts.length,1);assert.equal(starts[0][1].targets[0].uid,'123456');
 });

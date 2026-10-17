@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'"><title>双鱼助手 · 离线激活码生成器</title><link rel="stylesheet" href="style.css"></head><body><main>
+<h1>离线激活码生成器</h1><p>管理员专用。私钥只在当前页面内存中使用，不会上传或保存到浏览器。</p>
+<label>选择 Ed25519 私钥（private-key.pem）<input id="key" type="file" accept=".pem"></label>
+<div class="row"><label>激活后有效天数<input id="days" type="number" min="1" max="3650" step="1" value="7"></label><label>生成数量<input id="count" type="number" min="1" max="100" step="1" value="1"></label></div>
+<button id="generate" type="button">生成激活码</button><button id="download" type="button" disabled>下载 codes.txt</button><button id="clear" type="button">清空私钥和结果</button>
+<p id="status" role="status" aria-live="polite"></p><label>生成结果<textarea id="output" readonly rows="10" placeholder="生成后可复制此处激活码"></textarea></label>
+<p class="note">每个码首次成功输入后开始计时；默认 7 天。此离线方式不绑定机器，无法阻止跨电脑复用或清空本机记录后重新计时。不要把私钥或本工具的 private 文件夹发给软件用户。</p>
+</main><script src="app.js"></script></body></html>

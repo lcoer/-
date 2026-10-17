@@ -23,7 +23,7 @@ function registerDataIpc(ctx) {
   // 数据流事件 → 渲染进程
   dataStore.setStreamCallback((ev) => {
     const win = ctx.getMainWindow();
-    if (win && !win.isDestroyed()) win.webContents.send('portal:stream', ev);
+    if (win && !win.isDestroyed() && (!ctx.isAuthorized||ctx.isAuthorized())) win.webContents.send('portal:stream', ev);
   });
 }
 

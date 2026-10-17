@@ -14,7 +14,7 @@ const appConfig = require('../config');
 const {openOutcomeJournal} = require('./outcome-journal');
 const {isDefinitiveSendRejection} = require('../../src/send-proof.cjs');
 const {validateOptions,normalizeLevel,classifyRecommendations} = require('../../src/recommendation-policy.cjs');
-const {previewLevelTargets,assertLevelTargets}=require('../../src/private-level-policy.cjs');
+const {previewLevelTargets,assertLevelTargets,previewSelectedTargets,assertSelectedTargets}=require('../../src/private-level-policy.cjs');
 
 let _app = null;
 try { _app = require('electron').app; } catch { _app = null; }
@@ -151,6 +151,8 @@ function getRecommendations(options) {
 }
 function previewPrivateLevelTargets(request){return previewLevelTargets(getRecommendations(),request);}
 function assertPrivateLevelTargets(targets,filter){return assertLevelTargets(getRecommendations(),targets,filter);}
+function previewPrivateSelectedTargets(request){return previewSelectedTargets(getRecommendations(),request);}
+function assertPrivateSelectedTargets(targets,proof){return assertSelectedTargets(getRecommendations(),targets,proof);}
 function loadJson(file, target, fallback, critical = false) {
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -738,7 +740,7 @@ function resolvePending({ machineCode, targetUid, runId, resolution } = {}) {
   return recordOutcome({ ...pending, outcome: resolution === 'confirmed' ? 'confirmed_ui' : 'failed', stage: 'manual_review', reason: resolution === 'confirmed' ? 'MANUALLY_CONFIRMED' : 'MANUALLY_NOT_SENT', manualResolution: resolution, evidence: { ...pending.evidence, manualReview: true, resolution } });
 }
 return {
-  getRecommendations, previewPrivateLevelTargets, assertPrivateLevelTargets,
+  getRecommendations, previewPrivateLevelTargets, assertPrivateLevelTargets, previewPrivateSelectedTargets, assertPrivateSelectedTargets,
   init, shutdown, recordOutcome, resolvePending, isPending, getPendingResults, getLegacyCounts, getConfig, setConfig, allConfig,
   getDates, getStats, getRecords, getSummary, getTargetsByHour, getStatus,
   setStreamCallback, recordSend, getCounts, isSentToday, markSent,

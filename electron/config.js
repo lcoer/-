@@ -165,5 +165,5 @@ module.exports = {
     sampleIntervalMs: 8000,      // 演示模式模拟采集间隔
   },
 
-  appVersion: '1.3.5',
+  appVersion: '1.4.2',
 };

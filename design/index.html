@@ -48,10 +48,6 @@
           <span>实时贵宾位</span>
           <span class="nav-count" id="guestNavCount">--</span>
         </button>
-        <button class="nav-item" data-view="recommendation">
-          <span class="material-symbols-outlined">checklist</span>
-          <span>推荐列表</span>
-        </button>
         <button class="nav-item" data-view="rules">
           <span class="material-symbols-outlined">tune</span>
           <span>规则设定</span>
@@ -143,7 +139,7 @@
             <span class="material-symbols-outlined">delete_sweep</span>
             <span>清除虚拟数据</span>
           </button>
-          <button class="guest-collect-btn" id="guestCollectBtn" title="进入模拟器中的语音房间，读取可见公屏和麦位用户线索">
+          <button class="guest-collect-btn" id="guestCollectBtn" title="进入房间皇冠入口，采集今日房间贡献榜用户">
             <span class="material-symbols-outlined">sensors</span>
             <span id="guestCollectBtnText">开始实时采集</span>
           </button>
@@ -156,19 +152,19 @@
         <div class="collection-options">
           <label>采集范围 <select id="collectScope"><option value="multi">多房间遍历</option><option value="single">单房间，不轮换</option></select></label>
           <label>每轮最多房间 <input id="collectMaxRooms" type="number" min="1" max="30" value="12" /></label>
-          <label>每个成员列表最多页 <input id="collectMaxPages" type="number" min="1" max="12" value="6" /></label>
+          <label>每个贡献榜最多页 <input id="collectMaxPages" type="number" min="1" max="12" value="6" /></label>
           <label>每房间资料卡检查 <input id="collectMaxProfiles" type="number" min="0" max="12" value="6" /></label>
         </div>
         <div class="collection-progress">
           <span>本次新发现真实 UID <strong id="collectNewVerified">0</strong></span>
           <span>已浏览房间 <strong id="collectRooms">0</strong></span>
-          <span>成员列表页 <strong id="collectPages">0</strong></span>
+          <span>贡献榜页 <strong id="collectPages">0</strong></span>
           <span>资料卡检查 <strong id="collectProfiles">0</strong></span>
           <span>重复观察 <strong id="collectDuplicates">0</strong></span>
           <span>所选日期真实 UID <strong id="collectStoredVerified">0</strong></span>
           <span>待核验资料 <strong id="collectStoredHints">0</strong></span>
         </div>
-        <p class="field-hint" id="collectCoverageHint">多房间模式会自动切换房间；成员名单不可用时读取公屏与麦位。待核验资料可含靓号和等级，未确认 UID 的记录不会计入真实 UID 数量。</p>
+        <p class="field-hint" id="collectCoverageHint">从房间皇冠入口采集“房间贡献榜 → 今日”，包括前三名及翻页用户；多房间模式会自动切换房间。待核验靓号不作为真实 UID，历史采集记录保留。</p>
 
         <div class="guest-grid" id="guestGrid"></div>
 
@@ -196,6 +192,7 @@
             <span class="material-symbols-outlined">tune</span>
             <h2>规则设定</h2>
             <span class="rules-subtitle">配置自动私聊的执行规则</span>
+          <p class="field-hint">发送对象在控制台推荐列表中勾选；这里的来源、日期和性别不再限制勾选名单。发送间隔、上限和去重设置继续生效。</p>
           </div>
           <button class="save-btn" id="saveRulesBtn">
             <span class="material-symbols-outlined">save</span>保存配置
@@ -346,15 +343,34 @@
           </div>
         </div>
 
-        <div class="task-control-bar">
-          <div class="task-control-info task-level-controls">
-            <label><input type="checkbox" id="privateLevelEnabled"> 按等级筛选</label>
-            <label><input type="checkbox" id="privateLevelHigh" checked disabled> 高等级用户</label>
-            <label><input type="checkbox" id="privateLevelLow" disabled> 低等级用户</label>
-            <p class="field-hint" id="privateLevelHint">关闭时沿用原规则；开启后在原规则名单内筛选，未识别等级排除。</p>
+        <div class="recommendation-panel">
+        <div class="card recommendation-controls">
+          <h3>推荐列表 · 用户等级分类</h3>
+          <p class="field-hint">选择等级体系并设置分界：等级 ≥ 阈值为高等级，低于阈值为低等级。所选等级显示 ??? 时默认高等级；未识别等级单独列出。年龄、席位与贡献分数不作为等级。</p>
+          <div class="recommendation-toolbar">
+            <label>等级体系<select id="recommendLevelField"><option value="wealthLevel">财富等级（图一蓝色徽章，可变色）</option><option value="charmLevel">魅力等级（图一粉色徽章，可变色）</option></select></label>
+            <label>高等级阈值<input type="number" id="recommendThreshold" min="0" step="1" placeholder="请设置整数阈值"></label>
+            <button class="save-btn" id="recommendRefreshBtn">保存阈值并刷新</button>
           </div>
+          <p class="field-hint" id="recommendStatus" role="status">请设置分类阈值。</p>
         </div>
-
+        <div class="stats-row recommendation-stats">
+          <div class="stat-card"><div class="stat-label">高等级用户</div><div class="stat-value" id="recommendHighCount">0</div></div>
+          <div class="stat-card"><div class="stat-label">低等级用户</div><div class="stat-value" id="recommendLowCount">0</div></div>
+          <div class="stat-card"><div class="stat-label">等级未识别</div><div class="stat-value" id="recommendUnknownCount">0</div></div>
+        </div>
+        <div class="card">
+          <div class="recommendation-toolbar">
+            <label>查看分组<select id="recommendGroupFilter"><option value="all">全部用户</option><option value="high">高等级</option><option value="low">低等级</option><option value="unclassified">等级未识别</option></select></label>
+            <button class="save-btn ghost" id="recommendSelectAllBtn">全选当前分组</button>
+            <button class="save-btn ghost" id="recommendClearBtn">清空选择</button>
+            <span id="recommendSelectedCount" role="status">已选 0 人</span>
+          </div>
+          <p class="field-hint">自动私聊仅使用这里勾选的用户；原来源、日期和性别不再筛选名单。黑名单、间隔、上限和去重继续生效。切换分组会保留选择，重启软件后需重新勾选。</p>
+          <div class="recommendation-table-wrap custom-scroll"><table class="recommendation-table"><thead><tr><th>选择</th><th>用户 / UID</th><th>性别</th><th>财富等级</th><th>魅力等级</th><th>分组</th></tr></thead><tbody id="recommendRows"></tbody></table></div>
+          <p class="field-hint" id="recommendEmpty">暂无用户，请先采集并设置阈值。</p>
+        </div>
+        </div>
         <div class="task-stats-row">
           <div class="task-stat-card"><span class="task-stat-label">已处理</span><span class="task-stat-value" id="taskPrivateSent">0</span></div>
           <div class="task-stat-card"><span class="task-stat-label">界面确认</span><span class="task-stat-value" id="taskPrivateOk">0</span></div>
@@ -528,30 +544,7 @@
           </div>
         </div>
       </section>
-      <section class="view recommendation-view" hidden>
-        <div class="card recommendation-controls">
-          <h3>推荐列表 · 用户等级分类</h3>
-          <p class="field-hint">选择等级体系并设置分界：等级 ≥ 阈值为高等级，低于阈值为低等级。所选等级显示 ??? 时默认高等级；未识别等级单独列出。年龄、席位与贡献分数不作为等级。</p>
-          <div class="recommendation-toolbar">
-            <label>等级体系<select id="recommendLevelField"><option value="wealthLevel">财富等级（图一蓝色徽章，可变色）</option><option value="charmLevel">魅力等级（图一粉色徽章，可变色）</option></select></label>
-            <label>高等级阈值<input type="number" id="recommendThreshold" min="0" step="1" placeholder="请设置整数阈值"></label>
-            <button class="save-btn" id="recommendRefreshBtn">保存阈值并刷新</button>
-          </div>
-          <p class="field-hint" id="recommendStatus" role="status">请设置分类阈值。</p>
-        </div>
-        <div class="stats-row recommendation-stats">
-          <div class="stat-card"><div class="stat-label">高等级用户</div><div class="stat-value" id="recommendHighCount">0</div></div>
-          <div class="stat-card"><div class="stat-label">低等级用户</div><div class="stat-value" id="recommendLowCount">0</div></div>
-          <div class="stat-card"><div class="stat-label">等级未识别</div><div class="stat-value" id="recommendUnknownCount">0</div></div>
-        </div>
-        <div class="card">
-          <div class="recommendation-toolbar">
-            <label>查看分组<select id="recommendGroupFilter"><option value="all">全部用户</option><option value="high">高等级</option><option value="low">低等级</option><option value="unclassified">等级未识别</option></select></label>
-          </div>
-          <div class="recommendation-table-wrap custom-scroll"><table class="recommendation-table"><thead><tr><th>用户 / UID</th><th>性别</th><th>财富等级</th><th>魅力等级</th><th>分组</th></tr></thead><tbody id="recommendRows"></tbody></table></div>
-          <p class="field-hint" id="recommendEmpty">暂无用户，请先采集并设置阈值。</p>
-        </div>
-      </section>
+
     </main>
   </div>
 </div>

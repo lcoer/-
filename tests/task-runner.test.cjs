@@ -303,3 +303,17 @@ test('removed room actions reject without acquiring device or connecting', async
   assert.equal(runner.getStatus().statusRevision, before.statusRevision);
   assert.equal((await runner.withDeviceOperation('connect', async()=>({ok:true}))).ok, true);
 });
+test('selected-user proof checks before connecting and after initialization; only selected unknown-level users dispatch',async()=>{
+ const {previewSelectedTargets,assertSelectedTargets}=require('../src/private-level-policy.cjs');
+ const initial=()=>({levelField:'wealthLevel',threshold:54,users:['12345','23456','34567'].map(uid=>({uid,group:uid==='12345'?'unclassified':'high',original:{uid,source:'room',uidReal:true,nickname:'fixture'}}))});
+ let classification=initial(),connects=0;const sent=[];
+ const selected=previewSelectedTargets(classification,{uids:['12345','34567']});
+ const input={...cfg(),targets:selected.targets,selectionProof:selected.selectionProof,delayMin:0,delayMax:0};
+ const setupCase=change=>setup({store:{assertPrivateSelectedTargets:(targets,proof)=>assertSelectedTargets(classification,targets,proof)},client:{ensureClient:async()=>{connects++;change?.();return {mode:'android',serial:'test-device',adbPath:'fixture'};}},driver:{sendPrivateMessage:async(_nickname,_text,options)=>{sent.push(options.expectedUid);if(sent.length===1)classification.users[2].group='low';return {outcome:'confirmed_ui',evidence:{inputMatched:true,inputCleared:true,beforeExactCount:0,afterExactCount:1,actualUid:options.expectedUid}};}}});
+ classification.threshold=55;let runner=setupCase().runner;
+ assert.match((await runner.start('private',input)).reason,/重新确认/);assert.equal(connects,0);assert.equal(sent.length,0);
+ classification=initial();runner=setupCase(()=>{classification.users[0].group='high';}).runner;
+ assert.match((await runner.start('private',input)).reason,/重新确认/);assert.equal(connects,1);assert.equal(sent.length,0);
+ classification=initial();runner=setupCase().runner;
+ assert.equal((await runner.start('private',input)).ok,true);await runner.waitForIdle();assert.deepEqual(sent,['12345','34567']);
+});

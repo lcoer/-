@@ -92,6 +92,10 @@ const appConfig = require('./config');
 // 服务层
 const taskRunner = require('./services/task-runner');
 const dataStore = require('./services/data-store');
+const {createOfflineLicense}=require('./services/offline-license.cjs');
+const {safeStorage}=require('electron');
+const licenseConfig=require('./license-config.json');
+const {registerLicenseIpc}=require('./ipc/license-ipc');
 
 // 控制层(IPC 注册器)
 const { registerWindowIpc } = require('./ipc/window-ipc');
@@ -105,6 +109,24 @@ let staticServer = null;
 
 const IS_DEV = process.env.NODE_ENV === 'development';
 let mainWindow = null;
+let license=null,activePort=null,licenseRevision=0,businessReady=false,licenseStopping=Promise.resolve();
+function entryUrl(port=activePort){return `http://127.0.0.1:${port}/${license?.getStatus().active?'index.html':'activation.html'}`;}
+async function openBusiness(){
+  await licenseStopping;
+  license.assertActive();
+  if(!businessReady){dataStore.init();businessReady=true;}
+  mainWindow?.loadURL(entryUrl()).catch(error=>global.__sylog?.('license',error.message));
+}
+function licenseChanged(status){
+  const revision=++licenseRevision;
+  global.__sylog?.('license',`state=${status.state}`);
+  if(!status.active){
+    dataStore.shutdown();businessReady=false;
+    licenseStopping=taskRunner.stopAll().catch(()=>{}).then(()=>{
+      if(!shutdownStarted&&revision===licenseRevision&&!license.getStatus().active&&mainWindow&&!mainWindow.isDestroyed())mainWindow.loadURL(entryUrl()).catch(()=>{});
+    });
+  }
+}
 
 async function createWindow(port) {
   const LOG = (t, m) => global.__sylog && global.__sylog(t, m);
@@ -130,7 +152,7 @@ async function createWindow(port) {
   LOG('win', 'BrowserWindow 已构造');
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url !== `http://127.0.0.1:${port}/index.html`) event.preventDefault();
+    if(url!==entryUrl(port))event.preventDefault();
   });
 
   Menu.setApplicationMenu(null);
@@ -172,7 +194,7 @@ async function createWindow(port) {
     if (details.reason !== 'clean-exit' && mainWindow && !mainWindow.isDestroyed()) {
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.loadURL(`http://127.0.0.1:${port}/index.html`).catch(() => {});
+          mainWindow.loadURL(entryUrl(port)).catch(() => {});
         }
       }, 800);
     }
@@ -192,13 +214,20 @@ async function createWindow(port) {
 
   // 最后再发起加载:不 await 阻塞,加载失败也不会影响窗口显示(有 timeout 兜底)
   LOG('win', '开始 loadURL');
-  mainWindow.loadURL(`http://127.0.0.1:${port}/index.html`)
+  mainWindow.loadURL(entryUrl(port))
     .then(() => LOG('win', 'loadURL resolve'))
     .catch((e) => LOG('win', 'loadURL reject ' + ((e && e.message) || e)));
 }
 
 // ========== IPC 控制层挂载 ==========
-const ipcContext = { getMainWindow: () => mainWindow };
+const ipcContext = { getMainWindow: () => mainWindow, get license(){return license;},openBusiness,
+  isAuthorized:()=>!!license?.getStatus().active,
+  authorize:async channel=>{
+    if(!license)throw Error('请先输入激活码激活软件');
+    if(['task:start','collect:start','task:resolveNicknames','system:connectEmulator','system:installBridge','system:pickAdb','system:openClient'].includes(channel))await license.ensureActive();
+    license.assertActive();
+  }
+};
 
 // ========== App 生命周期 ==========
 app.whenReady().then(async () => {
@@ -208,14 +237,19 @@ app.whenReady().then(async () => {
     const service = await startStaticServer();
     staticServer = service.server;
     const port = service.port;
+    activePort=port;
     LOG('boot', `静态服务端口=${port}`);
 
     // 初始化数据存储与应用元信息
-    LOG('boot', 'dataStore.init ...');
-    dataStore.init();
-    LOG('boot', 'dataStore.init 完成');
+    LOG('boot', '授权状态初始化 ...');
+    license=createOfflineLicense({config:licenseConfig,dataDir:path.join(app.getPath('userData'),'licensing'),encrypt:value=>{if(!safeStorage.isEncryptionAvailable())throw Error('本机无法安全保存授权凭据');return safeStorage.encryptString(Buffer.isBuffer(value)?value.toString('utf8'):value);},decrypt:bytes=>safeStorage.decryptString(bytes),onChange:licenseChanged});
+    await license.initialize();
+    if(license.getStatus().active){dataStore.init();businessReady=true;}
+    taskRunner.setAuthorizationGuard(()=>license.assertActive());
+    LOG('boot', `授权校验完成，业务初始化=${businessReady}`);
 
     registerWindowIpc(ipcContext);
+    registerLicenseIpc(ipcContext);
     registerDataIpc(ipcContext);
     registerTaskIpc(ipcContext);
     registerSystemIpc(ipcContext);
@@ -223,13 +257,13 @@ app.whenReady().then(async () => {
 
     // 任务日志 → 渲染进程
     taskRunner.setLogCallback((entry) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow && !mainWindow.isDestroyed()&&license.getStatus().active) {
         mainWindow.webContents.send('task:log', entry);
       }
     });
     // 任务状态变化推送
     taskRunner.setStatusCallback((status) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow && !mainWindow.isDestroyed()&&license.getStatus().active) {
         mainWindow.webContents.send('task:status', status);
       }
     });
@@ -244,6 +278,7 @@ app.whenReady().then(async () => {
   } catch (e) {
     LOG('fatal', 'whenReady 内异常 ' + ((e && e.stack) || e));
     dataStore.shutdown();
+    license?.close();
     staticServer?.closeAllConnections?.();
     staticServer?.close();
     dialog.showErrorBox('双鱼助手无法启动', `初始化失败：${e.message}\n\n请保留用户数据文件和备份，核对恢复后再启动。`);
@@ -266,6 +301,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
+  license?.close();
   const deadline = new Promise(resolve => {
     const timer = setTimeout(() => { global.__sylog?.('shutdown', '任务收尾超过 8 秒'); resolve(); }, 8000);
     timer.unref();

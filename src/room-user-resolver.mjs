@@ -15,7 +15,7 @@ function visible(n, nodes) {
   const r = bounds(n), viewport = bounds(nodes[0]);
   return app(nodes) && r && viewport && r.x >= viewport.x && r.x2 <= viewport.x2 && r.y >= viewport.y && r.y2 <= viewport.y2;
 }
-const fullProfile = nodes => ['iv_chat','iv_follow','tv_nickname','tv_user_code'].every(key=>nodes.some(n=>id(n)===key&&visible(n,nodes)))&&nodes.some(n=>['iv_copy','ll_copy'].includes(id(n))&&visible(n,nodes));
+const fullProfile = nodes => ['iv_chat','tv_nickname'].every(key=>nodes.some(n=>id(n)===key&&visible(n,nodes)))&&nodes.some(n=>['iv_back','iv_follow'].includes(id(n))&&visible(n,nodes))&&nodes.some(n=>['tv_user_code','tv_nice_num'].includes(id(n))&&visible(n,nodes))&&nodes.some(n=>['iv_copy','ll_copy'].includes(id(n))&&visible(n,nodes));
 const roomPage = nodes => app(nodes) && !nodes.some(n => id(n) === 'rv_top_bg') && !fullProfile(nodes) && nodes.some(n => id(n) === 'tv_room_name' && visible(n, nodes)) && nodes.some(n => ['tv_room_code', 'layout_online_user'].includes(id(n)) && visible(n, nodes));
 // Preload cards contain these exact fields with empty values. The marker alone is insufficient.
 const cardPage = nodes => app(nodes) && (fullProfile(nodes)||isOperationRoomCard(nodes.filter(n=>visible(n,nodes))) || nodes.some(n => id(n) === 'rv_top_bg' && visible(n, nodes)) && nodes.some(n => id(n) === 'tv_nickname') && nodes.some(n => id(n) === 'tv_user_code'));
@@ -26,7 +26,7 @@ function canonicalUid(value) {
 /** Resolve a bounded set of currently visible seats through public user cards. */
 export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, signal, maxProfiles = 6, maxDurationMs = 10000, onUser = () => {
 }, onLog = () => {
-}, knownMappings, attemptHistory=new Map() } = {}) {
+}, knownMappings, attemptHistory=new Map(), sourcePage=roomPage, sourceNode } = {}) {
   throwIfAborted(signal);
   const start = Date.now(), deadline = start + Math.max(1, Math.min(60000, Number(maxDurationMs) || 10000));
   maxProfiles = Math.max(0, Math.min(30, Math.floor(Number(maxProfiles) || 0)));
@@ -65,17 +65,17 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
     let opened = false, nodes = [];
     try {
       nodes = await read();
-      if (!roomPage(nodes)) {
+      if (!sourcePage(nodes)) {
         reason = 'not_in_room';
         break;
       }
       const currentCode = text(nodes.find(n => id(n) === 'tv_room_code' && visible(n, nodes))).match(/\d{3,}/)?.[0];
-      if (roomCode && (!currentCode || String(roomCode) !== currentCode)) {
+      if (!sourceNode && roomCode && (!currentCode || String(roomCode) !== currentCode)) {
         reason = currentCode ? 'room_changed' : 'room_unverified';
         break;
       }
-      let seats = nodes.filter(n => id(n) === 'tv_wheat_name' && text(n) === user.nickname && n.enabled !== false && visible(n, nodes));
-      if(!seats.length)seats=nodes.filter(n=>['nickname','tv_nickname'].includes(id(n))&&text(n)===user.nickname&&n.enabled!==false&&visible(n,nodes));
+      let seats = sourceNode ? [sourceNode(nodes,user)].filter(Boolean) : nodes.filter(n => id(n) === 'tv_wheat_name' && text(n) === user.nickname && n.enabled !== false && visible(n, nodes));
+      if(!sourceNode&&!seats.length)seats=nodes.filter(n=>['nickname','tv_nickname'].includes(id(n))&&text(n)===user.nickname&&n.enabled!==false&&visible(n,nodes));
       if (seats.length !== 1) continue;
       visitedNames.add(user.nickname);
       attemptHistory.set(attemptKey(user),++ordinal);
@@ -87,7 +87,7 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
         continue;
       profilesRead++;
       // A card may briefly have blank fields; wait only within the profile and total budgets.
-      const before = resolved.length, cardDeadline = Math.min(deadline, Date.now() + 1800);
+      const before = resolved.length, cardDeadline = Math.min(deadline, Date.now() + (sourceNode ? 6000 : 1800));
       while (Date.now() < cardDeadline) {
         nodes = await read();
         if (cardPage(nodes)) {
@@ -141,7 +141,7 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
       }
       if (!opened) {
         reason = 'card_unavailable';
-        if(roomPage(nodes))continue;
+        if(sourcePage(nodes))continue;
         break;
       }
       if (resolved.length === before && reason === 'complete')
@@ -166,7 +166,7 @@ export async function resolveVisibleRoomUsers(driver, users, { room, roomCode, s
             for (let i = 0; i < 3; i++) {
               const check = await driver.bridge.dumpUi({ signal, retries: 0, timeout: 1200 });
               throwIfAborted(signal);
-              if (roomPage(check.nodes || [])) {
+              if (sourcePage(check.nodes || [])) {
                 restored = true;
                 break;
               }

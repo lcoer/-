@@ -24,6 +24,14 @@ export function profileLevelRegion(nodes,uid,nickname,options={}){
  const visible=identity(nodes,uid,nickname,options);if(!visible)return null;
  const name=nodes.find(n=>id(n)==='tv_nickname'&&visible(n)),ages=nodes.filter(n=>id(n)==='tv_age'&&visible(n));
  const statuses=nodes.filter(n=>id(n)==='tv_online_status'&&visible(n));
+ if(ages.length===1&&['iv_chat','iv_back'].every(key=>nodes.some(n=>id(n)===key&&visible(n)))&&nodes.some(n=>['iv_copy','ll_copy'].includes(id(n))&&visible(n))){
+  const signs=nodes.filter(n=>id(n)==='tv_sign'&&visible(n));
+  if(signs.length===1){
+   const root=nodes[0],w=root.x2-root.x,h=ages[0].y2-ages[0].y;
+   const top=Math.ceil(ages[0].y2+h*.5),bottom=Math.floor(signs[0].y-h*.4);
+   if(bottom-top>=12&&bottom-top<=150*w/1080)return {x:Math.ceil(root.x+w*.055),y:top,width:Math.floor(w*.245),height:bottom-top};
+  }
+ }
  if(ages.length!==1||statuses.length!==1)return null;
  const root=nodes[0],height=ages[0].y2-ages[0].y;
  const top=Math.max(name.y2+4,Math.floor(statuses[0].y-2.5*height)),bottom=Math.floor(statuses[0].y-.35*height);

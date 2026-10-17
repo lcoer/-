@@ -50,6 +50,7 @@ function createTaskRunner(deps = {}) {
     return new RoomCollector(drv, opts);
   });
   const session = new DeviceSession(), tasks = new Map();
+  let authorizationGuard=deps.authorize;
   let logCallback = null, statusCallback = null, collector = null, collectorRunId = null, statusRevision = 0;
   const emptyStats = () => ({
     sent: 0, ok: 0, fail: 0, unconfirmed: 0, cancelled: 0, skipped: 0, simulated: 0, clicked: 0
@@ -141,6 +142,7 @@ function createTaskRunner(deps = {}) {
     emitStatus();
     t.ready = (async () => {
       try {
+        await authorizationGuard?.();
         const context = await initialize(t);
         cancelled(t.controller.signal);
         t.state = 'running';
@@ -188,6 +190,7 @@ function createTaskRunner(deps = {}) {
       if (!checked.ok)
         throw Error(checked.reason);
       if(config.levelFilter!=null)dataStore.assertPrivateLevelTargets(checked.config.targets,config.levelFilter);
+      if(config.selectionProof!=null)dataStore.assertPrivateSelectedTargets(checked.config.targets,config.selectionProof);
       if (checked.duplicates.length)
         log('private', 'skip', `去除 ${checked.duplicates.length} 个重复目标`);
       if (t.mode === 'android') {
@@ -208,12 +211,14 @@ function createTaskRunner(deps = {}) {
         t.machineCode = dataStore.getMachineCode();
       }
       if(config.levelFilter!=null)dataStore.assertPrivateLevelTargets(checked.config.targets,config.levelFilter);
+      if(config.selectionProof!=null)dataStore.assertPrivateSelectedTargets(checked.config.targets,config.selectionProof);
       return checked.config;
     }, async (t, cfg) => {
       const signal = t.controller.signal, black = new Set((cfg.blacklist || []).map(String)), machine = t.machineCode || dataStore.getMachineCode();
       let failures = 0;
       log('private', 'info', `本次共 ${cfg.targets.length} 个目标，用户间隔 ${cfg.delayMin}–${cfg.delayMax} 秒`);
       for (let i = 0; i < cfg.targets.length; i++) {
+        await authorizationGuard?.();
         cancelled(signal);
         if (t.mode === 'android' && dataStore.getConfig('settings')?.senderAccountUid !== t.senderAccountUid)
           throw Error('SENDER_ACCOUNT_CHANGED: 发送账号设置已变化，请重新确认并启动任务');
@@ -236,6 +241,7 @@ function createTaskRunner(deps = {}) {
             result = await t.driver.sendPrivateMessage(target.nickname, cfg.contents[cfg.mode === 'select' ? cfg.selectedIndex : Math.floor(Math.random() * cfg.contents.length)], {
               expectedUid: target.uid, signal, onLog: (l, m) => log('private', l, m),
               onBeforeSend: async () => {
+                await authorizationGuard?.();
                 // Save intent before clicking send so a process crash cannot trigger a retry.
                 cancelled(signal);
                 if (dataStore.getConfig('settings')?.senderAccountUid !== t.senderAccountUid)
@@ -335,7 +341,7 @@ function createTaskRunner(deps = {}) {
         throw Error('INVALID_COLLECT_INTERVAL');
       const drv = await readyDriver(t);
       collector = await createCollector(drv, {
-        intervalMs, scope, maxRooms, maxPages, maxProfiles, roomName: opts.roomName || null, signal: t.controller.signal,
+        intervalMs, scope, maxRooms, maxPages, maxProfiles, collectionSource:'dailyContribution', roomName: opts.roomName || null, signal: t.controller.signal,
         ...(dataStore.getCollectionCoverage?.() || {}),
         onProgress: () => {
           if (!t.controller.signal.aborted)
@@ -412,6 +418,7 @@ function createTaskRunner(deps = {}) {
     return { ok: true, ...getStatus() };
   }
   return {
+    setAuthorizationGuard:guard=>{authorizationGuard=guard;},
     start, stop, stopAll, waitForIdle, getStatus, startCollect, stopCollect, getCollectStatus, resolveNicknames, withDeviceOperation, refreshDriver, setLogCallback: fn => {
       logCallback = fn;
     }, setStatusCallback: fn => {

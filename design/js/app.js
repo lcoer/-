@@ -3,7 +3,7 @@
   const api = window.api;
 
   // ===== 视图路由 =====
-  const VIEWS = ['ranking', 'rules', 'task', 'copywriting', 'blacklist', 'settings', 'recommendation'];
+  const VIEWS = ['ranking', 'rules', 'task', 'copywriting', 'blacklist', 'settings'];
   function switchView(name) {
     $$('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === name));
     VIEWS.forEach(v => {
@@ -13,7 +13,7 @@
       sec.hidden = !active;
       sec.classList.toggle('active', active);
     });
-    if (name === 'recommendation') RecommendationView.refresh();
+    if (name === 'task') RecommendationView.refresh();
   }
 
   function bindNav() {
@@ -59,8 +59,8 @@
     await safeStep('Copywriting', () => Copywriting.init());
     await safeStep('Blacklist', () => Blacklist.init());
     await safeStep('Settings', () => Settings.init());
-    await safeStep('TaskConsole', () => TaskConsole.init());
     await safeStep('RecommendationView', () => RecommendationView.init());
+    await safeStep('TaskConsole', () => TaskConsole.init());
     api.task.onStatus(GuestView.onTaskStatus);
 
     // 顶部刷新按钮

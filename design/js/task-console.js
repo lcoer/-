@@ -4,20 +4,6 @@ const TaskConsole = (function () {
   const LOG_MAX = 400;
   let latestStatusRevision = -1;
   let privateStartPending = false, latestTaskStatus = null;
-  const levelIds=['privateLevelEnabled','privateLevelHigh','privateLevelLow'];
-  let levelSave=Promise.resolve(),levelSettings=null;
-  function readLevelFilter(){return {enabled:document.getElementById(levelIds[0]).checked,groups:['high','low'].filter((_,i)=>document.getElementById(levelIds[i+1]).checked)};}
-  function renderLevelControls(){
-    const enabled=readLevelFilter().enabled,busy=privateStartPending||!!latestTaskStatus?.private?.running;
-    levelIds.forEach((id,i)=>{document.getElementById(id).disabled=busy||(i>0&&!enabled);});
-    const rule=levelSettings?`${levelSettings.levelField==='wealthLevel'?'财富':'魅力'}等级 ≥ ${levelSettings.threshold} 为高等级，低于阈值为低等级；明确问号归高等级。`:'分类标准与推荐列表共用。';
-    document.getElementById('privateLevelHint').textContent=rule+' 开启后在原规则名单内筛选，未识别等级排除；关闭时沿用原规则。';
-  }
-  async function refreshLevelSettings(){
-    if(api.recommendation?.list){try{const response=await api.recommendation.list();if(response?.ok)levelSettings=response.settings;}catch(_){}}
-    renderLevelControls();
-  }
-
   const logList = document.getElementById('taskLogList');
 
   // ===== 日志渲染 =====
@@ -63,7 +49,7 @@ const TaskConsole = (function () {
       latestStatusRevision = status.statusRevision;
     }
     latestTaskStatus = status;
-    renderLevelControls();
+    RecommendationView.setBusy(privateStartPending||!!status.private?.running);
     const p = status.private?.stats || {};
     document.getElementById('taskPrivateSent').textContent = p.sent || 0;
     document.getElementById('taskPrivateOk').textContent = p.ok || 0;
@@ -81,29 +67,25 @@ const TaskConsole = (function () {
 
   // ===== 私聊启动配置组装 =====
   async function buildPrivateConfig() {
-    const levelChoice=readLevelFilter(),levelSnapshot=JSON.stringify(levelChoice);
-    if(levelChoice.enabled&&!levelChoice.groups.length)throw Error('请至少勾选高等级或低等级用户');
-    await levelSave;
-    const rulesSnapshot = JSON.stringify(RulesView.readForm());
-    const rules = JSON.parse(rulesSnapshot);
+    const selection=RecommendationView.getSelection();
+    const safetySnapshot=value=>JSON.stringify([value.delayMin,value.delayMax,value.noDuplicate,value.sendLimit]);
+    const rules = RulesView.readForm(),rulesSnapshot=safetySnapshot(rules);
     const copy = await Copywriting.flush();
     const blacklist = await api.config.get('blacklist');
     const settings = await api.config.get('settings') || {};
     // 目标列表按 UID 搜索；昵称用于展示，不作为发送身份依据。
     const executionMode = settings.executionMode === 'demo' ? 'demo' : 'android';
-    let targets = await RulesView.getTargets({ demo: executionMode === 'demo' });
-    let levelPreview;
-    if(levelChoice.enabled){
-      levelPreview=await api.task.previewLevelTargets({targets,groups:levelChoice.groups});
-      if(!levelPreview?.ok)throw Error(levelPreview?.reason||'等级筛选失败');
-      targets=levelPreview.targets;levelSettings=levelPreview.levelFilter;renderLevelControls();
-    }
-    if(levelSnapshot!==JSON.stringify(readLevelFilter()))throw Error('等级选择已变化，请重新确认并启动');
-    if (rulesSnapshot !== JSON.stringify(RulesView.readForm())) throw Error('目标规则在准备期间发生变化，请重新确认并启动');
+    const preview=await api.task.previewSelectedTargets({uids:selection.uids});
+    if(!preview?.ok)throw Error(preview?.reason||'已选用户无法准备，请刷新列表后重新勾选');
+    if(preview.selectionProof.levelField!==selection.settings.levelField||preview.selectionProof.threshold!==selection.settings.threshold)throw Error('分类标准已变化，请刷新推荐列表后重新勾选');
+    const targets=preview.targets;
+    if(JSON.stringify(selection)!==JSON.stringify(RecommendationView.getSelection()))throw Error('勾选名单已变化，请重新确认并启动');
+    if (rulesSnapshot !== safetySnapshot(RulesView.readForm())) throw Error('发送规则在准备期间发生变化，请重新确认并启动');
 
     return {
       targets,
-      ...(levelPreview?{levelFilter:levelPreview.levelFilter,levelExcludedUnknown:levelPreview.excludedUnknown,levelExcludedOther:levelPreview.excludedOther}:{}),
+      selectionProof:preview.selectionProof,
+      selectionSnapshot:JSON.stringify(selection),
       executionMode,
       senderAccountUid: settings.senderAccountUid || '',
       targetIds: targets.map(t => t.uid),
@@ -121,27 +103,15 @@ const TaskConsole = (function () {
   }
 
   async function init() {
-    const savedLevel=await api.config.get('privateLevelFilter');
-    document.getElementById(levelIds[0]).checked=savedLevel?.enabled===true;
-    const groups=Array.isArray(savedLevel?.groups)?savedLevel.groups:['high'];
-    document.getElementById(levelIds[1]).checked=groups.includes('high');
-    document.getElementById(levelIds[2]).checked=groups.includes('low');
-    levelIds.forEach(id=>document.getElementById(id).addEventListener('change',()=>{
-      const preference=readLevelFilter();renderLevelControls();
-      levelSave=levelSave.catch(()=>{}).then(async()=>{const res=await api.config.set('privateLevelFilter',preference);if(!res?.ok)throw Error(res?.reason||'等级选项保存失败');});
-      levelSave.catch(error=>toast(error.message,'error'));
-    }));
-    document.querySelector('.nav-item[data-view="task"]')?.addEventListener('click',refreshLevelSettings);
-    await refreshLevelSettings();
     // 私聊
     document.getElementById('taskPrivateStart').addEventListener('click', async () => {
       if (privateStartPending) return;
       privateStartPending = true;
       document.getElementById('taskPrivateStart').disabled = true;
-      renderLevelControls();
+      RecommendationView.setBusy(true);
       try {
         const config = await buildPrivateConfig();
-        if (config.targets.length === 0) { toast(config.levelFilter?`等级筛选后没有可发送目标（等级未识别或未核验 ${config.levelExcludedUnknown} 人）。请检查原规则或等级选择。`:'没有可发送的目标,请先在规则设定中选择来源', 'error'); return; }
+        if (config.targets.length === 0) throw Error('请先勾选要私聊的用户');
         const { validatePrivateConfig } = await import('/engine/task-policy.mjs');
         const checked = validatePrivateConfig(config);
         if (!checked.ok) { toast(checked.reason, 'error'); return; }
@@ -153,9 +123,10 @@ const TaskConsole = (function () {
           ? `使用文案：${config.contents[config.selectedIndex]}`
           : `每位用户随机选择以下 ${config.contents.length} 条文案中的一条：\n${config.contents.map((text, i) => `${i + 1}. ${text}`).join('\n')}`;
         const senderPreview = config.executionMode === 'android' ? `\n发送账号 UID：${config.senderAccountUid}。请确认与模拟器当前登录账号一致。` : '';
-        const levelPreview=config.levelFilter?`\n等级筛选：${config.levelFilter.groups.map(g=>g==='high'?'高等级':'低等级').join('、')}；${config.levelFilter.levelField==='wealthLevel'?'财富':'魅力'}等级 ≥ ${config.levelFilter.threshold} 为高等级，明确问号归高等级。\n排除等级未识别或未核验 ${config.levelExcludedUnknown} 人；其他等级分组 ${config.levelExcludedOther} 人。`:'';
-        const ok = await Dialog.confirm(`${label}${senderPreview}${levelPreview}\n按 UID 搜索共 ${checked.config.targets.length} 个目标。\n${copyPreview}\n待确认结果会停止本批次，确认开始？`, '启动自动私聊');
+        const targetPreview=config.targets.map(target=>target.nickname?target.nickname+' (UID '+target.uid+')':'UID '+target.uid).join('\n');
+        const ok = await Dialog.confirm(`${label}${senderPreview}\n仅向已勾选的 ${checked.config.targets.length} 位用户私聊：\n${targetPreview}\n${copyPreview}\n黑名单、发送上限及去重仍会跳过不符合条件的目标。待确认结果会停止本批次，确认开始？`, '启动自动私聊');
         if (!ok) return;
+        if(config.selectionSnapshot!==JSON.stringify(RecommendationView.getSelection()))throw Error('勾选名单已变化，请重新确认并启动');
         const res = await api.task.start('private', config);
         if (res.ok) toast('自动私聊已启动', 'ok');
         else toast(`启动失败: ${res.reason}`, 'error');
@@ -164,7 +135,7 @@ const TaskConsole = (function () {
       } finally {
         privateStartPending = false;
         if (latestTaskStatus) updateStats(latestTaskStatus);
-        renderLevelControls();
+        RecommendationView.setBusy(privateStartPending||!!latestTaskStatus?.private?.running);
       }
     });
     document.getElementById('taskPrivateStop').addEventListener('click', async () => {

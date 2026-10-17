@@ -197,7 +197,7 @@ const GuestView = (function () {
     document.getElementById('collectPages').textContent = fmtNum(st.pagesScanned);
     document.getElementById('collectProfiles').textContent = fmtNum(st.profilesRead);
     document.getElementById('collectDuplicates').textContent = fmtNum(st.duplicateSightings);
-    const coverage = { empty: '成员名单显示暂无数据，已降级为公屏与麦位；多房间模式会继续下一房间。', unavailable: '未找到可用成员列表，读取公屏与麦位线索。', partial: '成员列表只完成部分扫描，保留已读数据并继续遍历。', complete: '本房间成员列表已扫描；真实 UID 与待核验资料分别统计。' };
+    const coverage = { empty: '今日房间贡献榜暂无用户，多房间模式会继续下一房间。', unavailable: '今日房间贡献榜暂不可用，请确认皇冠入口和桥接状态。', partial: '今日贡献榜已按页数或时间上限完成部分扫描，已读数据保留。', complete: '本房间今日贡献榜已扫描；真实 UID 与待核验资料分别统计。' };
     if (st.memberStatus) document.getElementById('collectCoverageHint').textContent = coverage[st.memberStatus] || '正在扫描公开可见用户；本次新 UID 已排除历史已采集 ID。';
     if (st.waitingForNextCycle) document.getElementById('collectCoverageHint').textContent = st.navigationStatus === 'retry' ? '暂未确认更多可访问房间，正在等待重试。' : '已达到本轮访问范围，正在等待下一轮。';
     if (!state.collecting) document.getElementById('collectCoverageHint').textContent = st.state === 'failed' ? `采集失败：${st.error || '请查看控制台日志'}` : '采集已停止，已采集记录已保留。';

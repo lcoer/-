@@ -38,6 +38,32 @@ test('returnHome refuses an unknown or foreign screen without any click',async()
   const d=fixture();d.setNodes(nodes);await assert.rejects(new PrivateNavigator(d.driver,options).returnHome());assert.equal(d.actions.length,0);
  }
 });
+test('private startup returns from a room rank through the room before searching UID',async()=>{
+ const d=fixture();let current=[root(),node('','房间贡献榜',400,70,700,150,{selected:true,clickable:true}),node('','今日',370,230,456,287,{selected:true,clickable:true}),node('ivToolbarBack','',0,60,150,169,{clickable:true})];
+ const room=[root(),node('tv_room_name','room',20,60,500,120),node('tv_room_code','ID:911',20,130,300,170),node('layout_online_user','',700,70,850,160),node('iv_quit','',950,70,1030,160)];
+ const originalDump=d.driver.bridge.dumpUi,originalTap=d.driver.adb.tap,originalBack=d.driver.adb.back;
+ d.driver.bridge.dumpUi=async()=>current?{nodes:current}:originalDump();
+ d.driver.adb.tap=async(x,y)=>{if(current){assert.equal(current[1].text,'房间贡献榜');d.actions.push('rank-back');current=room;}else await originalTap(x,y);};
+ d.driver.adb.back=async()=>{if(current){d.actions.push('room-back');current=null;d.setNodes(home().concat(node('rv_recommend_room','',0,400,1080,1600,{className:'androidx.recyclerview.widget.RecyclerView'})));}else await originalBack();};
+ const result=await new PrivateNavigator(d.driver,options).open('888188');assert.equal(result.uid,'888188');assert.deepEqual(d.actions.slice(0,3),['rank-back','room-back','iv_search']);assert.equal(d.actions.includes('iv_quit'),false);
+});
+test('unfamiliar in-app page can use its unique observed toolbar back before private search',async()=>{
+ const d=fixture();d.setNodes([root(),node('ivToolbarBack','',0,60,150,169,{clickable:true}),node('title','设置',300,60,700,160)]);
+ d.driver.bridge.tapByCoord=async(x,y)=>{if(x===75&&y===114.5){d.actions.push('toolbar-back');d.setNodes(home());}else await d.driver.adb.tap(x,y);return {ok:true};};
+ await new PrivateNavigator(d.driver,options).open('888188');assert.deepEqual(d.actions.slice(0,2),['toolbar-back','iv_search']);
+});
+test('a stuck or ambiguous toolbar fails before typing or sending',async()=>{
+ for(const duplicate of [false,true]){
+  const d=fixture(),backs=[node('ivToolbarBack','',0,60,150,169,{clickable:true})];if(duplicate)backs.push(node('iv_back','',160,60,300,169,{clickable:true}));
+  d.setNodes([root(),...backs]);d.driver.bridge.tapByCoord=async()=>{d.actions.push('toolbar-back');return {ok:true};};
+  await assert.rejects(new PrivateNavigator(d.driver,options).open('888188'));assert.ok(!d.actions.some(a=>a.startsWith('set:')||a==='iv_chat'||a==='iv_send'));assert.ok(d.actions.length<=1);
+ }
+});
+test('cancelling toolbar recovery prevents all subsequent search actions',async()=>{
+ const d=fixture(),abort=new AbortController();d.setNodes([root(),node('ivToolbarBack','',0,60,150,169,{clickable:true})]);
+ d.driver.bridge.tapByCoord=async()=>{d.actions.push('toolbar-back');abort.abort();return {ok:true};};
+ await assert.rejects(new PrivateNavigator(d.driver,{...options,signal:abort.signal}).open('888188'),{name:'AbortError'});assert.deepEqual(d.actions,['toolbar-back']);
+});
 test('UID search selects user tab and creates verified first conversation without nickname lookup',async()=>{
  const d=fixture();const n=new PrivateNavigator(d.driver,options);
  const p=await n.open('888188');assert.equal(p.uid,'888188');assert.equal(p.nickname,'Current name');
